@@ -5,6 +5,13 @@ import argparse
 import csv
 import math
 import time
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+import absl.logging
+absl.logging.set_verbosity(absl.logging.ERROR)
+absl.logging.set_stderrthreshold('error')
+
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -20,7 +27,7 @@ import numpy as np
 VIDEO_ROOT = Path("video")
 DRY_RUN_DIR = VIDEO_ROOT / "dry"
 
-REFERENCE_VIDEO_NAME = "étalon.mp4"
+REFERENCE_VIDEO_NAME = "etalon.mp4"
 EXPECTED_FILE_NAME = "attendu.txt"
 
 # Colonnes CSV / catégories analysées.
@@ -424,8 +431,10 @@ def analyze_video_one_pass(
 
                 if dynamic_normalization:
                     current_ear_norm = normalizer.update(current_ear)
-                else:
+                elif profile is not None:
                     current_ear_norm = normalize_ear_static(current_ear, profile)
+                else:
+                    current_ear_norm = None
 
             ears.append(np.nan if current_ear is None else current_ear)
             norm_ears.append(np.nan if current_ear_norm is None else current_ear_norm)
@@ -641,7 +650,7 @@ def run_real(
                 f"  - calibration: attendu={expected_blinks}, "
                 f"prédit_ref={thresholds['predicted_reference_blinks']}, "
                 f"close={thresholds['close_threshold']:.2f}, "
-                f"open={thresholds['open_threshold']:.2f}, "
+                f"open={thresholds['open_threshold']:.2f}, "    
                 f"open_ref={profile['ear_open_ref']:.3f}, "
                 f"closed_ref={profile['ear_closed_ref']:.3f}"
             )
@@ -743,7 +752,7 @@ def main():
         raise ValueError("--show est interdit en real run pour des raisons de performance.")
 
     t0 = time.perf_counter()
-    
+
     if args.dry_run:
         run_dry_run(
             model_path=model_path,

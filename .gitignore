@@ -210,5 +210,5 @@ __marimo__/
 *.mp4
 *.csv
 *.task
-
-
+*.txt
+*.zip
