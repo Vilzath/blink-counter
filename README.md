@@ -1,125 +1,114 @@
-BlinkCounter
+# BlinkCounter
 
-Outil Python permettant de compter automatiquement les clignements d’yeux dans des vidéos à partir des landmarks faciaux MediaPipe.
+BlinkCounter est un outil Python permettant de **compter automatiquement les clignements d’yeux dans des vidéos** à partir des **landmarks faciaux MediaPipe**.
 
-Le logiciel est conçu pour traiter de grandes cohortes de sujets où chaque sujet possède :
+Le logiciel est conçu pour traiter **des cohortes importantes de sujets** où chaque sujet possède :
 
-une vidéo étalon
+- une **vidéo étalon**
+- plusieurs **vidéos expérimentales**
 
-plusieurs vidéos expérimentales
+Le programme produit un **fichier CSV contenant le nombre de clignements par sujet et par condition expérimentale**.
 
-Le programme produit un tableau CSV du nombre de clignements par sujet et par condition.
+---
 
-Principe de fonctionnement
+# Principe de fonctionnement
 
-Le logiciel utilise MediaPipe Face Landmarker pour détecter les points du visage.
+Le logiciel utilise **MediaPipe Face Landmarker** pour détecter les points du visage.
 
-Pour chaque frame :
+Pour chaque image de la vidéo :
 
-détection du visage
+1. détection du visage  
+2. extraction des points des paupières  
+3. calcul du **Eye Aspect Ratio (EAR)**
 
-extraction des landmarks des paupières
+Formule :
 
-calcul du Eye Aspect Ratio (EAR)
+```
+EAR = (||p2 - p6|| + ||p3 - p5||) / (2 * ||p1 - p4||)
+```
 
-𝐸
-𝐴
-𝑅
-=
-∣
-∣
-𝑝
-2
-−
-𝑝
-6
-∣
-∣
-+
-∣
-∣
-𝑝
-3
-−
-𝑝
-5
-∣
-∣
-2
-×
-∣
-∣
-𝑝
-1
-−
-𝑝
-4
-∣
-∣
-EAR=
-2×∣∣p1−p4∣∣
-∣∣p2−p6∣∣+∣∣p3−p5∣∣
-	​
+Le EAR mesure l’ouverture de l’œil :
 
+| EAR | Interprétation |
+|----|----|
+| élevé | œil ouvert |
+| faible | œil fermé |
 
-Le EAR mesure l’ouverture de l’œil.
+---
 
-EAR	état
-élevé	œil ouvert
-faible	œil fermé
-Normalisation par sujet
+# Normalisation par sujet
 
-La morphologie des yeux varie selon les individus.
-
-Pour rendre les résultats comparables, une normalisation est réalisée à partir d’une vidéo étalon.
+La morphologie des yeux varie selon les individus.  
+Pour rendre les résultats comparables, le logiciel normalise le EAR à partir d’une **vidéo étalon**.
 
 Sur la vidéo étalon :
 
-extraction de tous les EAR
-
-calcul de :
-
+```
 EAR_open_ref   = percentile 95
 EAR_closed_ref = percentile 5
+```
 
-Puis le EAR est normalisé :
+Puis :
 
+```
 EAR_norm = (EAR - EAR_closed_ref) / (EAR_open_ref - EAR_closed_ref)
+```
 
-Cela permet de comparer les clignements indépendamment de la morphologie.
+Le clignement est détecté sur **EAR_norm**, pas sur le EAR brut.
 
-Détection des clignements
+---
 
-La détection repose sur une hystérésis :
+# Détection des clignements
 
+Le système utilise une **hystérésis** :
+
+```
 fermeture si  EAR_norm < close_threshold
 réouverture si EAR_norm > open_threshold
+```
 
-Un clignement est validé si la fermeture dure entre :
+Un clignement est validé si la durée de fermeture est comprise entre :
 
+```
 min_closed_frames
 max_closed_frames
-Calibration automatique
+```
+
+Cette logique évite :
+
+- les faux positifs
+- les oscillations autour d’un seuil unique
+
+---
+
+# Calibration automatique
 
 Chaque dossier sujet contient un fichier :
 
+```
 attendu.txt
+```
 
-Ce fichier contient le nombre réel de clignements observés dans la vidéo étalon.
+Ce fichier contient le **nombre réel de clignements observés dans la vidéo étalon**.
 
-Le script teste plusieurs couples de seuils :
+Le programme teste plusieurs couples de seuils :
 
+```
 close_threshold
 open_threshold
+```
 
 et choisit ceux qui reproduisent le mieux ce nombre.
 
-Ces seuils sont ensuite utilisés pour toutes les vidéos du sujet.
+Les seuils calibrés sont ensuite utilisés pour les vidéos expérimentales.
 
-Structure des données
+---
 
-Le dossier video/ doit contenir un dossier par sujet.
+# Structure des données
 
+Le dossier `video/` doit contenir un dossier par sujet.
+
+```
 video/
 ├── dry/
 │   └── test.mp4
@@ -132,126 +121,193 @@ video/
 │   ├── étalon.mp4
 │   ├── attendu.txt
 │   └── normal.mp4
+```
 
-Contenu de attendu.txt :
+Contenu de `attendu.txt` :
 
+```
 17
-Résultat
+```
+
+---
+
+# Résultat
 
 Le programme produit un CSV :
 
+```
 subject,normal,chaussette
 sujet_001,18,11
 sujet_002,15,
 sujet_003,,9
+```
 
-lignes → sujets
+- lignes → sujets  
+- colonnes → conditions expérimentales  
 
-colonnes → conditions expérimentales
+---
 
-Modes d'exécution
-Dry run
+# Modes d'exécution
 
-Analyse une seule vidéo dans :
+## Dry run
 
+Analyse une seule vidéo située dans :
+
+```
 video/dry/
+```
 
 Utilisé pour :
 
-vérifier la détection
+- vérifier la détection
+- visualiser le EAR
+- tester les paramètres
 
-visualiser le EAR
+---
 
-vérifier les seuils
-
-Real run
+## Real run
 
 Analyse complète :
 
-lecture de étalon.mp4
+1. analyse de `étalon.mp4`
+2. calibration des seuils
+3. analyse des vidéos expérimentales
+4. génération du CSV final
 
-calibration des seuils
+---
 
-analyse des vidéos expérimentales
+# Arguments du script
 
-génération du CSV final
-
-Arguments du script
---model
+## `--model`
 
 Chemin vers le modèle MediaPipe.
 
+Exemple :
+
+```
 --model face_landmarker.task
---dry-run
+```
+
+---
+
+## `--dry-run`
 
 Mode test.
 
 Par défaut :
 
+```
 true
+```
 
 Pour lancer l’étude complète :
 
+```
 --dry-run false
---show
+```
+
+---
+
+## `--show`
 
 Affiche la vidéo annotée pendant l’analyse.
 
-Affiche :
+Informations affichées :
 
-EAR brut
+- EAR brut
+- EAR normalisé
+- nombre de clignements
 
-EAR normalisé
+⚠️ disponible uniquement en **dry run**
 
-nombre de clignements
+---
 
-⚠️ disponible uniquement en dry run
-
---csv
+## `--csv`
 
 Nom du fichier CSV de sortie.
 
 Par défaut :
 
+```
 results.csv
+```
 
 Exemple :
 
+```
 --csv etude.csv
---min-closed-frames
+```
+
+---
+
+## `--min-closed-frames`
 
 Durée minimale d’une fermeture pour valider un clignement.
 
 Défaut :
 
+```
 2
---max-closed-frames
+```
+
+---
+
+## `--max-closed-frames`
 
 Durée maximale d’une fermeture pour valider un clignement.
 
 Défaut :
 
+```
 12
-Exemples d'utilisation
-Test simple
+```
+
+---
+
+# Exemples d’utilisation
+
+### Test simple
+
+```
 python betterBlink.py --model face_landmarker.task
-Test avec affichage
+```
+
+### Test avec affichage
+
+```
 python betterBlink.py --model face_landmarker.task --show
-Lancer l'étude complète
+```
+
+### Lancer l'étude complète
+
+```
 python betterBlink.py --model face_landmarker.task --dry-run false
-Export CSV personnalisé
+```
+
+### Export CSV personnalisé
+
+```
 python betterBlink.py --model face_landmarker.task --dry-run false --csv etude.csv
-Dépendances
+```
+
+---
+
+# Dépendances
 
 Python ≥ 3.10
 
-Installer les bibliothèques :
+Installer :
 
+```
 pip install mediapipe opencv-python numpy
-Performances
+```
 
-Chaque vidéo est lue une seule fois.
+---
+
+# Performances
+
+Chaque vidéo est **lue une seule fois**.
 
 Le coût principal est la détection des landmarks faciaux via MediaPipe.
 
-Le pipeline est conçu pour traiter de grandes cohortes sans relire les vidéos inutilemen
+Le pipeline est conçu pour **traiter de grandes cohortes de sujets** sans relecture inutile des vidéos.
