@@ -311,3 +311,121 @@ Chaque vidéo est **lue une seule fois**.
 Le coût principal est la détection des landmarks faciaux via MediaPipe.
 
 Le pipeline est conçu pour **traiter de grandes cohortes de sujets** sans relecture inutile des vidéos.
+
+# Remarques sur l'erreur du modèle
+
+Le script calcule en `real_run` trois métriques globales d'erreur à partir des **vidéos étalon disponibles** :
+
+- **Erreur moyenne relative**
+- **Biais moyen**
+- **Écart type de l'erreur**
+
+Ces valeurs sont écrites dans le fichier :
+
+```text
+Erreur relative.txt
+```
+
+Ce fichier est **remplacé à chaque exécution** du `real_run`.
+
+---
+
+## Ce que mesurent ces métriques
+
+Pour chaque sujet disposant d'une vidéo étalon valide :
+
+- `attendu` = nombre réel de clignements indiqué dans `attendu.txt`
+- `prédit` = nombre de clignements trouvé par le script sur l'étalon après calibration
+
+À partir de ces valeurs, le script calcule :
+
+### Erreur moyenne relative
+
+Elle mesure l'écart moyen entre le nombre attendu et le nombre prédit, **rapporté au nombre attendu**.
+
+Forme utilisée :
+
+```text
+|prédit - attendu| / attendu
+```
+
+Puis la moyenne est calculée sur l'ensemble des étalons disponibles.
+
+Interprétation :
+
+- plus cette valeur est faible, plus le comptage sur les étalons est proche de la référence
+- c'est une mesure globale de précision de comptage sur les vidéos étalon
+
+---
+
+### Biais moyen
+
+Il mesure la tendance moyenne du modèle à :
+
+- **surcompter** les clignements
+- ou **sous-compter** les clignements
+
+Forme utilisée :
+
+```text
+prédit - attendu
+```
+
+Interprétation :
+
+- biais moyen **positif** : tendance à trouver trop de clignements
+- biais moyen **négatif** : tendance à en manquer
+- biais proche de zéro : pas de dérive moyenne forte
+
+---
+
+### Écart type de l'erreur
+
+Il mesure la **dispersion des erreurs** entre sujets.
+
+Interprétation :
+
+- faible écart type : comportement relativement stable entre sujets
+- fort écart type : comportement plus variable selon les vidéos étalon
+
+---
+
+## Peut-on généraliser ces résultats aux vidéos de catégorie ?
+
+**Pas directement de manière certaine**, mais ces métriques donnent une **tendance générale du comportement du modèle sur les étalons analysés**.
+
+Ce que l'on peut dire :
+
+- elles décrivent le comportement du pipeline sur les **vidéos étalon**
+- elles donnent une idée du niveau d'erreur global observé sur les sujets disponibles au moment du run
+
+Ce que l'on ne peut pas affirmer automatiquement :
+
+- que l'erreur sera exactement la même sur toutes les vidéos de catégorie
+- que le pourcentage de clignements ratés sur les catégories est identique à celui observé sur les étalons
+
+---
+
+## Interprétation recommandée
+
+Les métriques du fichier `Erreur relative.txt` doivent être interprétées comme :
+
+> une estimation globale de l'erreur du modèle sur les vidéos étalon disponibles pendant l'exécution
+
+Elles sont utiles pour :
+
+- suivre la qualité globale du pipeline
+- vérifier si le modèle tend à sous-compter ou surcompter
+- comparer plusieurs versions du script ou des réglages
+
+---
+
+## Limite importante
+
+Ces métriques sont calculées uniquement à partir de ce qui est disponible dans le pipeline actuel :
+
+- `attendu.txt`
+- comptage prédit sur l'étalon
+- agrégation globale de ces erreurs
+
+Elles ne constituent donc **pas** une mesure directe de l'erreur sur les vidéos de catégorie, mais une **référence globale issue des étalons**.
