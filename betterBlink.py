@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
 import argparse
 import csv
 import math
 import time
-import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import absl.logging
 absl.logging.set_verbosity(absl.logging.ERROR)
-absl.logging.set_stderrthreshold('error')
-
-from pathlib import Path
-from typing import Dict, List, Optional
+absl.logging.set_stderrthreshold("error")
 
 import cv2
 import mediapipe as mp
@@ -131,6 +131,36 @@ def median_filter_nan(values: np.ndarray, k: int = 3) -> np.ndarray:
 def read_expected_blinks(expected_file: Path) -> int:
     content = expected_file.read_text(encoding="utf-8").strip()
     return int(content)
+
+
+def compute_blink_interval_stats(blink_timestamps: List[float]) -> Dict[str, Optional[float]]:
+    """
+    Calcule les écarts entre clignements successifs.
+    Retourne des secondes.
+    Si moins de 2 clignements, les stats d'intervalle sont indisponibles.
+    """
+    if blink_timestamps is None or len(blink_timestamps) < 2:
+        return {
+            "mean_interval": None,
+            "min_interval": None,
+            "max_interval": None,
+        }
+
+    ts = np.array(blink_timestamps, dtype=np.float32)
+    intervals = np.diff(ts)
+
+    if intervals.size == 0:
+        return {
+            "mean_interval": None,
+            "min_interval": None,
+            "max_interval": None,
+        }
+
+    return {
+        "mean_interval": float(np.mean(intervals)),
+        "min_interval": float(np.min(intervals)),
+        "max_interval": float(np.max(intervals)),
+    }
 
 
 # ============================================================
@@ -267,12 +297,16 @@ def build_profile_from_reference_ears(ears: np.ndarray) -> Dict:
     }
 
 
-def normalize_ear_static(ear: Optional[float], profile: Dict) -> Optional[float]:
+def normalize_ear_static(ear: Optional[float], profile: Optional[Dict]) -> Optional[float]:
     if ear is None or not np.isfinite(ear):
         return None
+    if profile is None:
+        return None
+
     denom = profile["ear_open_ref"] - profile["ear_closed_ref"]
     if denom <= 1e-8:
         return None
+
     return float((ear - profile["ear_closed_ref"]) / denom)
 
 
@@ -376,6 +410,8 @@ def analyze_video_one_pass(
     show: bool = False,
     dynamic_normalization: bool = False,
 ) -> Dict:
+    start_time = time.perf_counter()
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Impossible d'ouvrir la vidéo: {video_path}")
@@ -505,6 +541,9 @@ def analyze_video_one_pass(
     if show:
         cv2.destroyAllWindows()
 
+    elapsed = time.perf_counter() - start_time
+    interval_stats = compute_blink_interval_stats(detector.blink_timestamps)
+
     return {
         "video_path": str(video_path),
         "fps": float(fps),
@@ -514,8 +553,12 @@ def analyze_video_one_pass(
         "face_detect_rate": float(valid_frames / frame_idx) if frame_idx > 0 else 0.0,
         "blink_count": int(detector.blink_count),
         "blink_timestamps": detector.blink_timestamps,
+        "blink_interval_mean": interval_stats["mean_interval"],
+        "blink_interval_min": interval_stats["min_interval"],
+        "blink_interval_max": interval_stats["max_interval"],
         "ears": np.array(ears, dtype=np.float32),
         "norm_ears": np.array(norm_ears, dtype=np.float32),
+        "elapsed_seconds": float(elapsed),
     }
 
 
@@ -571,6 +614,7 @@ def run_dry_run(
     print(f"Open threshold      : {DEFAULT_OPEN_THRESHOLD:.2f}")
     print(f"EAR_norm p05/p95    : {norm_p05:.3f} / {norm_p95:.3f}")
     print(f"Clignements détectés: {result['blink_count']}")
+    print(f"Temps vidéo         : {result['elapsed_seconds']:.2f} s")
 
 
 # ============================================================
@@ -629,12 +673,21 @@ def run_real(
                 show=False,
                 dynamic_normalization=False,  # on veut juste les EAR bruts
             )
+            print(
+                f"  - étalon analysé en {ref_result['elapsed_seconds']:.2f} s "
+                f"| face_detect_rate={ref_result['face_detect_rate']:.4f}"
+            )
         except Exception as exc:
             print(f"  - erreur analyse étalon: {exc}")
             continue
 
         try:
-            profile = build_profile_from_reference_ears(ref_result["ears"])
+            ears = ref_result.get("ears")
+            if ears is None or np.isfinite(ears).sum() < 10:
+                print("  - vidéo étalon invalide (pas assez de détection visage)")
+                continue
+
+            profile = build_profile_from_reference_ears(ears)
             ref_norm = normalize_series_static(ref_result["ears"], profile)
             ref_norm = median_filter_nan(ref_norm, k=SMOOTH_KERNEL)
 
@@ -650,7 +703,7 @@ def run_real(
                 f"  - calibration: attendu={expected_blinks}, "
                 f"prédit_ref={thresholds['predicted_reference_blinks']}, "
                 f"close={thresholds['close_threshold']:.2f}, "
-                f"open={thresholds['open_threshold']:.2f}, "    
+                f"open={thresholds['open_threshold']:.2f}, "
                 f"open_ref={profile['ear_open_ref']:.3f}, "
                 f"closed_ref={profile['ear_closed_ref']:.3f}"
             )
@@ -665,6 +718,10 @@ def run_real(
 
             if not video_path.exists():
                 row[category] = ""
+                row[f"{category} mean"] = ""
+                row[f"{category} low"] = ""
+                row[f"{category} high"] = ""
+                row[f"{category} Face Detect Rate"] = ""
                 print(f"  - {category}: absent")
                 continue
 
@@ -679,15 +736,50 @@ def run_real(
                     show=False,
                     dynamic_normalization=False,
                 )
+
                 row[category] = result["blink_count"]
-                print(f"  - {category}: {result['blink_count']}")
+                row[f"{category} mean"] = (
+                    f"{result['blink_interval_mean']:.3f}"
+                    if result["blink_interval_mean"] is not None else ""
+                )
+                row[f"{category} low"] = (
+                    f"{result['blink_interval_min']:.3f}"
+                    if result["blink_interval_min"] is not None else ""
+                )
+                row[f"{category} high"] = (
+                    f"{result['blink_interval_max']:.3f}"
+                    if result["blink_interval_max"] is not None else ""
+                )
+                row[f"{category} Face Detect Rate"] = f"{result['face_detect_rate']:.4f}"
+
+                print(
+                    f"  - {category}: {result['blink_count']} | "
+                    f"mean={result['blink_interval_mean'] if result['blink_interval_mean'] is not None else 'NA'} | "
+                    f"low={result['blink_interval_min'] if result['blink_interval_min'] is not None else 'NA'} | "
+                    f"high={result['blink_interval_max'] if result['blink_interval_max'] is not None else 'NA'} | "
+                    f"Face Detect Rate={result['face_detect_rate']:.4f} | "
+                    f"time={result['elapsed_seconds']:.2f}s"
+                )
+
             except Exception as exc:
                 row[category] = ""
+                row[f"{category} mean"] = ""
+                row[f"{category} low"] = ""
+                row[f"{category} high"] = ""
+                row[f"{category} Face Detect Rate"] = ""
                 print(f"  - {category}: erreur ({exc})")
 
         rows.append(row)
 
-    fieldnames = ["subject"] + list(CATEGORY_FILES.keys())
+    fieldnames = ["subject"]
+    for category in CATEGORY_FILES.keys():
+        fieldnames.extend([
+            category,
+            f"{category} mean",
+            f"{category} low",
+            f"{category} high",
+            f"{category} Face Detect Rate",
+        ])
 
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
