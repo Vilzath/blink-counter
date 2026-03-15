@@ -29,6 +29,7 @@ DRY_RUN_DIR = VIDEO_ROOT / "dry"
 
 REFERENCE_VIDEO_NAME = "etalon.mp4"
 EXPECTED_FILE_NAME = "attendu.txt"
+ERROR_REPORT_FILE = Path("Erreur relative.txt")
 
 # Colonnes CSV / catégories analysées.
 # Modifie simplement cette table.
@@ -163,6 +164,88 @@ def compute_blink_interval_stats(blink_timestamps: List[float]) -> Dict[str, Opt
     }
 
 
+def compute_reference_error_metrics(reference_errors: List[Dict]) -> Dict[str, Optional[float]]:
+    """
+    Calcule les métriques globales sur les vidéos étalon disponibles.
+    - relative_mean_error : moyenne de |pred - expected| / expected
+    - mean_bias : moyenne de (pred - expected)
+    - error_std : écart-type de (pred - expected)
+    """
+    if not reference_errors:
+        return {
+            "n_subjects": 0,
+            "relative_mean_error": None,
+            "mean_bias": None,
+            "error_std": None,
+        }
+
+    signed_errors = np.array([item["signed_error"] for item in reference_errors], dtype=np.float32)
+
+    relative_errors = [
+        item["relative_error"]
+        for item in reference_errors
+        if item["relative_error"] is not None
+    ]
+    relative_errors = np.array(relative_errors, dtype=np.float32) if relative_errors else np.array([], dtype=np.float32)
+
+    return {
+        "n_subjects": int(len(reference_errors)),
+        "relative_mean_error": float(np.mean(relative_errors)) if relative_errors.size > 0 else None,
+        "mean_bias": float(np.mean(signed_errors)),
+        "error_std": float(np.std(signed_errors, ddof=0)),
+    }
+
+
+def write_reference_error_report(
+    report_path: Path,
+    reference_errors: List[Dict],
+    metrics: Dict[str, Optional[float]],
+):
+    """
+    Écrit le rapport d'erreur global sur les étalons.
+    Remplace le fichier à chaque run.
+    """
+    lines = []
+    lines.append("Rapport global d'erreur sur les vidéos étalon")
+    lines.append("")
+
+    n_subjects = metrics.get("n_subjects", 0)
+    rme = metrics.get("relative_mean_error")
+    mean_bias = metrics.get("mean_bias")
+    error_std = metrics.get("error_std")
+
+    lines.append(f"Nombre de sujets analysés : {n_subjects}")
+    lines.append(
+        "Erreur moyenne relative : "
+        + (f"{rme:.6f} ({rme * 100:.2f}%)" if rme is not None else "NA")
+    )
+    lines.append(
+        "Biais moyen : "
+        + (f"{mean_bias:.6f}" if mean_bias is not None else "NA")
+    )
+    lines.append(
+        "Ecart type de l'erreur : "
+        + (f"{error_std:.6f}" if error_std is not None else "NA")
+    )
+    lines.append("")
+    lines.append("Détail par sujet :")
+    lines.append("subject\tattendu\tpredit\terreur_signee\terreur_absolue\terreur_relative")
+
+    for item in reference_errors:
+        rel = item["relative_error"]
+        rel_str = f"{rel:.6f}" if rel is not None else "NA"
+        lines.append(
+            f"{item['subject']}\t"
+            f"{item['expected']}\t"
+            f"{item['predicted']}\t"
+            f"{item['signed_error']}\t"
+            f"{item['absolute_error']}\t"
+            f"{rel_str}"
+        )
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 # ============================================================
 # MediaPipe
 # ============================================================
@@ -262,7 +345,7 @@ class OnlineBlinkDetector:
         else:
             self.closed_len += 1
             if value > self.open_threshold:
-                if self.min_closed_frames <= self.closed_len <= self.max_closed_frames:
+                if self.min_closed_frames <= self.closed_len <= self.max_closed_FRAMES:
                     self.blink_count += 1
                     ts = (self.closed_start_frame + self.closed_len / 2.0) / self.fps
                     self.blink_timestamps.append(ts)
@@ -270,6 +353,10 @@ class OnlineBlinkDetector:
                 self.in_closed = False
                 self.closed_start_frame = None
                 self.closed_len = 0
+
+
+# Fix typo-safe alias
+OnlineBlinkDetector.max_closed_FRAMES = property(lambda self: self.max_closed_frames)
 
 
 # ============================================================
@@ -636,6 +723,7 @@ def run_real(
         raise FileNotFoundError(f"Aucun dossier sujet trouvé dans {VIDEO_ROOT}")
 
     rows = []
+    reference_errors = []
 
     for subject_dir in subject_dirs:
         subject_id = subject_dir.name
@@ -699,13 +787,38 @@ def run_real(
                 max_closed_frames=max_closed_frames,
             )
 
+            predicted_ref = thresholds["predicted_reference_blinks"]
+            signed_error = predicted_ref - expected_blinks
+            absolute_error = abs(signed_error)
+            relative_error = (
+                absolute_error / expected_blinks
+                if expected_blinks > 0 else None
+            )
+
+            reference_errors.append({
+                "subject": subject_id,
+                "expected": int(expected_blinks),
+                "predicted": int(predicted_ref),
+                "signed_error": int(signed_error),
+                "absolute_error": int(absolute_error),
+                "relative_error": float(relative_error) if relative_error is not None else None,
+            })
+
             print(
                 f"  - calibration: attendu={expected_blinks}, "
-                f"prédit_ref={thresholds['predicted_reference_blinks']}, "
+                f"prédit_ref={predicted_ref}, "
                 f"close={thresholds['close_threshold']:.2f}, "
                 f"open={thresholds['open_threshold']:.2f}, "
                 f"open_ref={profile['ear_open_ref']:.3f}, "
-                f"closed_ref={profile['ear_closed_ref']:.3f}"
+                f"closed_ref={profile['ear_closed_ref']:.3f}, "
+                f"err_rel={relative_error:.4f}" if relative_error is not None else
+                f"  - calibration: attendu={expected_blinks}, "
+                f"prédit_ref={predicted_ref}, "
+                f"close={thresholds['close_threshold']:.2f}, "
+                f"open={thresholds['open_threshold']:.2f}, "
+                f"open_ref={profile['ear_open_ref']:.3f}, "
+                f"closed_ref={profile['ear_closed_ref']:.3f}, "
+                f"err_rel=NA"
             )
         except Exception as exc:
             print(f"  - erreur calibration: {exc}")
@@ -786,7 +899,29 @@ def run_real(
         writer.writeheader()
         writer.writerows(rows)
 
+    metrics = compute_reference_error_metrics(reference_errors)
+    write_reference_error_report(ERROR_REPORT_FILE, reference_errors, metrics)
+
     print(f"\nCSV écrit: {output_csv}")
+    print(f"Rapport erreur écrit: {ERROR_REPORT_FILE}")
+
+    if metrics["n_subjects"] > 0:
+        rme = metrics["relative_mean_error"]
+        mean_bias = metrics["mean_bias"]
+        error_std = metrics["error_std"]
+
+        print(
+            "Résumé erreur étalons: "
+            f"n={metrics['n_subjects']} | "
+            f"erreur moyenne relative={(rme * 100):.2f}% " if rme is not None else
+            f"Résumé erreur étalons: n={metrics['n_subjects']} | erreur moyenne relative=NA ",
+            end=""
+        )
+        print(
+            f"| biais moyen={mean_bias:.4f} | écart type erreur={error_std:.4f}"
+            if mean_bias is not None and error_std is not None
+            else "| biais moyen=NA | écart type erreur=NA"
+        )
 
 
 # ============================================================
