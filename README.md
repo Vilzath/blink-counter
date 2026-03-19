@@ -312,7 +312,7 @@ Le coût principal est la détection des landmarks faciaux via MediaPipe.
 
 Le pipeline est conçu pour **traiter de grandes cohortes de sujets** sans relecture inutile des vidéos.
 
-# Remarques sur l'erreur du modèle
+# Calcul de l'erreur
 
 Le script calcule en `real_run` trois métriques globales d'erreur à partir des **vidéos étalon disponibles** :
 
@@ -360,10 +360,7 @@ Interprétation :
 
 ### Biais moyen
 
-Il mesure la tendance moyenne du modèle à :
-
-- **surcompter** les clignements
-- ou **sous-compter** les clignements
+Il mesure la tendance moyenne du modèle à surcompter ou sous compter dans les vidéos.
 
 Forme utilisée :
 
@@ -390,19 +387,23 @@ Interprétation :
 
 ---
 
-## Peut-on généraliser ces résultats aux vidéos de catégorie ?
+## Peut-on généraliser ces résultats aux vidéos lors d'activité ?
 
-**Pas directement de manière certaine**, mais ces métriques donnent une **tendance générale du comportement du modèle sur les étalons analysés**.
+Ces métriques donnent une **tendance générale du comportement du modèle sur les étalons analysés**.
 
 Ce que l'on peut dire :
 
-- elles décrivent le comportement du pipeline sur les **vidéos étalon**
+- elles décrivent le comportement sur les **vidéos étalon**
 - elles donnent une idée du niveau d'erreur global observé sur les sujets disponibles au moment du run
 
-Ce que l'on ne peut pas affirmer automatiquement :
+Donc, il est possible de généraliser aux videos d'activités mais uniquement si celle ci sont dans les memes conditions
+- même cadrage
+- même résolution
+- même luminosité
+- même sujet
+- même posture
 
-- que l'erreur sera exactement la même sur toutes les vidéos de catégorie
-- que le pourcentage de clignements ratés sur les catégories est identique à celui observé sur les étalons
+
 
 ---
 

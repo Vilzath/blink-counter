@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["GLOG_minloglevel"] = "2"   # 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL
 
 import argparse
 import csv
@@ -34,10 +35,13 @@ ERROR_REPORT_FILE = Path("Erreur relative.txt")
 # Colonnes CSV / catégories analysées.
 # Modifie simplement cette table.
 CATEGORY_FILES = {
-    "normal": "normal.mp4",
-    "chaussette": "chaussette.mp4",
-    # "lecture": "lecture.mp4",
-    # "fatigue": "fatigue.mp4",
+    "Coloriage": "Coloriage.mp4",
+    "Jeu SANS chrono": "Jeu SANS chrono.mp4",
+    "Jeu AVEC chrono": "Jeu AVEC chrono.mp4",
+    "Parinaud 5 ordi": "Parinaud 5 ordi.mp4",
+    "Parinaud 5 papier": "Parinaud 5 papier.mp4",
+    # "Lecture": "Lecture.mp4",
+    # "Fatigue": "Fatigue.mp4",
 }
 
 DEFAULT_OUTPUT_CSV = "results.csv"
@@ -246,6 +250,18 @@ def write_reference_error_report(
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def format_optional_float(value: Optional[float], digits: int = 3) -> str:
+    if value is None:
+        return ""
+    return f"{value:.{digits}f}"
+
+
+def compute_blinks_per_minute(blink_count: int, duration_seconds: float) -> Optional[float]:
+    if duration_seconds is None or duration_seconds <= 0:
+        return None
+    return float((blink_count * 60.0) / duration_seconds)
+
+
 # ============================================================
 # MediaPipe
 # ============================================================
@@ -345,7 +361,7 @@ class OnlineBlinkDetector:
         else:
             self.closed_len += 1
             if value > self.open_threshold:
-                if self.min_closed_frames <= self.closed_len <= self.max_closed_FRAMES:
+                if self.min_closed_frames <= self.closed_len <= self.max_closed_frames:
                     self.blink_count += 1
                     ts = (self.closed_start_frame + self.closed_len / 2.0) / self.fps
                     self.blink_timestamps.append(ts)
@@ -353,10 +369,6 @@ class OnlineBlinkDetector:
                 self.in_closed = False
                 self.closed_start_frame = None
                 self.closed_len = 0
-
-
-# Fix typo-safe alias
-OnlineBlinkDetector.max_closed_FRAMES = property(lambda self: self.max_closed_frames)
 
 
 # ============================================================
@@ -631,18 +643,27 @@ def analyze_video_one_pass(
     elapsed = time.perf_counter() - start_time
     interval_stats = compute_blink_interval_stats(detector.blink_timestamps)
 
+    if fps > 0 and frame_idx > 0:
+        duration_seconds = frame_idx / fps
+    else:
+        duration_seconds = None
+
+    blinks_per_minute = compute_blinks_per_minute(detector.blink_count, duration_seconds)
+
     return {
         "video_path": str(video_path),
         "fps": float(fps),
         "total_frames": int(total_frames) if total_frames > 0 else frame_idx,
         "processed_frames": int(frame_idx),
         "valid_frames": int(valid_frames),
+        "duration_seconds": float(duration_seconds) if duration_seconds is not None else None,
         "face_detect_rate": float(valid_frames / frame_idx) if frame_idx > 0 else 0.0,
         "blink_count": int(detector.blink_count),
         "blink_timestamps": detector.blink_timestamps,
         "blink_interval_mean": interval_stats["mean_interval"],
         "blink_interval_min": interval_stats["min_interval"],
         "blink_interval_max": interval_stats["max_interval"],
+        "blinks_per_minute": blinks_per_minute,
         "ears": np.array(ears, dtype=np.float32),
         "norm_ears": np.array(norm_ears, dtype=np.float32),
         "elapsed_seconds": float(elapsed),
@@ -701,6 +722,7 @@ def run_dry_run(
     print(f"Open threshold      : {DEFAULT_OPEN_THRESHOLD:.2f}")
     print(f"EAR_norm p05/p95    : {norm_p05:.3f} / {norm_p95:.3f}")
     print(f"Clignements détectés: {result['blink_count']}")
+    print(f"Clign./minute       : {format_optional_float(result['blinks_per_minute'], 1)}")
     print(f"Temps vidéo         : {result['elapsed_seconds']:.2f} s")
 
 
@@ -804,22 +826,20 @@ def run_real(
                 "relative_error": float(relative_error) if relative_error is not None else None,
             })
 
-            print(
+            calib_msg = (
                 f"  - calibration: attendu={expected_blinks}, "
                 f"prédit_ref={predicted_ref}, "
                 f"close={thresholds['close_threshold']:.2f}, "
                 f"open={thresholds['open_threshold']:.2f}, "
                 f"open_ref={profile['ear_open_ref']:.3f}, "
                 f"closed_ref={profile['ear_closed_ref']:.3f}, "
-                f"err_rel={relative_error:.4f}" if relative_error is not None else
-                f"  - calibration: attendu={expected_blinks}, "
-                f"prédit_ref={predicted_ref}, "
-                f"close={thresholds['close_threshold']:.2f}, "
-                f"open={thresholds['open_threshold']:.2f}, "
-                f"open_ref={profile['ear_open_ref']:.3f}, "
-                f"closed_ref={profile['ear_closed_ref']:.3f}, "
-                f"err_rel=NA"
             )
+            if relative_error is not None:
+                calib_msg += f"err_rel={relative_error:.4f}"
+            else:
+                calib_msg += "err_rel=NA"
+            print(calib_msg)
+
         except Exception as exc:
             print(f"  - erreur calibration: {exc}")
             continue
@@ -834,6 +854,7 @@ def run_real(
                 row[f"{category} mean"] = ""
                 row[f"{category} low"] = ""
                 row[f"{category} high"] = ""
+                row[f"{category} per minute"] = ""
                 row[f"{category} Face Detect Rate"] = ""
                 print(f"  - {category}: absent")
                 continue
@@ -851,18 +872,10 @@ def run_real(
                 )
 
                 row[category] = result["blink_count"]
-                row[f"{category} mean"] = (
-                    f"{result['blink_interval_mean']:.3f}"
-                    if result["blink_interval_mean"] is not None else ""
-                )
-                row[f"{category} low"] = (
-                    f"{result['blink_interval_min']:.3f}"
-                    if result["blink_interval_min"] is not None else ""
-                )
-                row[f"{category} high"] = (
-                    f"{result['blink_interval_max']:.3f}"
-                    if result["blink_interval_max"] is not None else ""
-                )
+                row[f"{category} mean"] = format_optional_float(result["blink_interval_mean"], 3)
+                row[f"{category} low"] = format_optional_float(result["blink_interval_min"], 3)
+                row[f"{category} high"] = format_optional_float(result["blink_interval_max"], 3)
+                row[f"{category} per minute"] = format_optional_float(result["blinks_per_minute"], 1)
                 row[f"{category} Face Detect Rate"] = f"{result['face_detect_rate']:.4f}"
 
                 print(
@@ -870,6 +883,7 @@ def run_real(
                     f"mean={result['blink_interval_mean'] if result['blink_interval_mean'] is not None else 'NA'} | "
                     f"low={result['blink_interval_min'] if result['blink_interval_min'] is not None else 'NA'} | "
                     f"high={result['blink_interval_max'] if result['blink_interval_max'] is not None else 'NA'} | "
+                    f"per_min={format_optional_float(result['blinks_per_minute'], 1) if result['blinks_per_minute'] is not None else 'NA'} | "
                     f"Face Detect Rate={result['face_detect_rate']:.4f} | "
                     f"time={result['elapsed_seconds']:.2f}s"
                 )
@@ -879,6 +893,7 @@ def run_real(
                 row[f"{category} mean"] = ""
                 row[f"{category} low"] = ""
                 row[f"{category} high"] = ""
+                row[f"{category} per minute"] = ""
                 row[f"{category} Face Detect Rate"] = ""
                 print(f"  - {category}: erreur ({exc})")
 
@@ -891,6 +906,7 @@ def run_real(
             f"{category} mean",
             f"{category} low",
             f"{category} high",
+            f"{category} per minute",
             f"{category} Face Detect Rate",
         ])
 
@@ -910,18 +926,18 @@ def run_real(
         mean_bias = metrics["mean_bias"]
         error_std = metrics["error_std"]
 
-        print(
-            "Résumé erreur étalons: "
-            f"n={metrics['n_subjects']} | "
-            f"erreur moyenne relative={(rme * 100):.2f}% " if rme is not None else
-            f"Résumé erreur étalons: n={metrics['n_subjects']} | erreur moyenne relative=NA ",
-            end=""
+        summary = f"Résumé erreur étalons: n={metrics['n_subjects']} | "
+        summary += (
+            f"erreur moyenne relative={(rme * 100):.2f}% | "
+            if rme is not None else
+            "erreur moyenne relative=NA | "
         )
-        print(
-            f"| biais moyen={mean_bias:.4f} | écart type erreur={error_std:.4f}"
+        summary += (
+            f"biais moyen={mean_bias:.4f} | écart type erreur={error_std:.4f}"
             if mean_bias is not None and error_std is not None
-            else "| biais moyen=NA | écart type erreur=NA"
+            else "biais moyen=NA | écart type erreur=NA"
         )
+        print(summary)
 
 
 # ============================================================
