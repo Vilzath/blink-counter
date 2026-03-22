@@ -9,7 +9,7 @@ import csv
 import math
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import absl.logging
 absl.logging.set_verbosity(absl.logging.ERROR)
@@ -40,8 +40,6 @@ CATEGORY_FILES = {
     "Jeu AVEC chrono": "Jeu AVEC chrono.mp4",
     "Parinaud 5 ordi": "Parinaud 5 ordi.mp4",
     "Parinaud 5 papier": "Parinaud 5 papier.mp4",
-    # "Lecture": "Lecture.mp4",
-    # "Fatigue": "Fatigue.mp4",
 }
 
 DEFAULT_OUTPUT_CSV = "results.csv"
@@ -58,7 +56,7 @@ CLOSED_PERCENTILE = 5
 DEFAULT_CLOSE_THRESHOLD = 0.25
 DEFAULT_OPEN_THRESHOLD = 0.45
 
-# Dry run en mode show : nombre minimal de frames valides
+# Dry run legacy dynamique : nombre minimal de frames valides
 # avant de commencer à afficher un EAR normalisé stable.
 DRY_SHOW_WARMUP_VALID_FRAMES = 30
 
@@ -125,10 +123,7 @@ def median_filter_nan(values: np.ndarray, k: int = 3) -> np.ndarray:
         end = min(len(values), i + radius + 1)
         chunk = values[start:end]
         finite = chunk[np.isfinite(chunk)]
-        if finite.size > 0:
-            out[i] = np.median(finite)
-        else:
-            out[i] = np.nan
+        out[i] = np.median(finite) if finite.size > 0 else np.nan
 
     return out
 
@@ -139,11 +134,6 @@ def read_expected_blinks(expected_file: Path) -> int:
 
 
 def compute_blink_interval_stats(blink_timestamps: List[float]) -> Dict[str, Optional[float]]:
-    """
-    Calcule les écarts entre clignements successifs.
-    Retourne des secondes.
-    Si moins de 2 clignements, les stats d'intervalle sont indisponibles.
-    """
     if blink_timestamps is None or len(blink_timestamps) < 2:
         return {
             "mean_interval": None,
@@ -169,12 +159,6 @@ def compute_blink_interval_stats(blink_timestamps: List[float]) -> Dict[str, Opt
 
 
 def compute_reference_error_metrics(reference_errors: List[Dict]) -> Dict[str, Optional[float]]:
-    """
-    Calcule les métriques globales sur les vidéos étalon disponibles.
-    - relative_mean_error : moyenne de |pred - expected| / expected
-    - mean_bias : moyenne de (pred - expected)
-    - error_std : écart-type de (pred - expected)
-    """
     if not reference_errors:
         return {
             "n_subjects": 0,
@@ -184,7 +168,6 @@ def compute_reference_error_metrics(reference_errors: List[Dict]) -> Dict[str, O
         }
 
     signed_errors = np.array([item["signed_error"] for item in reference_errors], dtype=np.float32)
-
     relative_errors = [
         item["relative_error"]
         for item in reference_errors
@@ -205,10 +188,6 @@ def write_reference_error_report(
     reference_errors: List[Dict],
     metrics: Dict[str, Optional[float]],
 ):
-    """
-    Écrit le rapport d'erreur global sur les étalons.
-    Remplace le fichier à chaque run.
-    """
     lines = []
     lines.append("Rapport global d'erreur sur les vidéos étalon")
     lines.append("")
@@ -256,7 +235,7 @@ def format_optional_float(value: Optional[float], digits: int = 3) -> str:
     return f"{value:.{digits}f}"
 
 
-def compute_blinks_per_minute(blink_count: int, duration_seconds: float) -> Optional[float]:
+def compute_blinks_per_minute(blink_count: int, duration_seconds: Optional[float]) -> Optional[float]:
     if duration_seconds is None or duration_seconds <= 0:
         return None
     return float((blink_count * 60.0) / duration_seconds)
@@ -270,6 +249,13 @@ def full_metric_fields(base_name: str) -> List[str]:
         f"{base_name} high",
         f"{base_name} per minute",
         f"{base_name} Face Detect Rate",
+    ]
+
+
+def build_subject_dirs() -> List[Path]:
+    return [
+        p for p in sorted(VIDEO_ROOT.iterdir())
+        if p.is_dir() and p.name != "dry"
     ]
 
 
@@ -295,7 +281,7 @@ def create_landmarker(model_path: Path):
 
 
 # ============================================================
-# Online dynamic normalizer (dry-run --show / dry simple)
+# Online dynamic normalizer (dry-run legacy)
 # ============================================================
 
 class OnlineEarNormalizer:
@@ -654,11 +640,7 @@ def analyze_video_one_pass(
     elapsed = time.perf_counter() - start_time
     interval_stats = compute_blink_interval_stats(detector.blink_timestamps)
 
-    if fps > 0 and frame_idx > 0:
-        duration_seconds = frame_idx / fps
-    else:
-        duration_seconds = None
-
+    duration_seconds = (frame_idx / fps) if (fps > 0 and frame_idx > 0) else None
     blinks_per_minute = compute_blinks_per_minute(detector.blink_count, duration_seconds)
 
     return {
@@ -682,10 +664,115 @@ def analyze_video_one_pass(
 
 
 # ============================================================
-# Dry run
+# Dry run helpers
 # ============================================================
 
-def run_dry_run(
+def find_first_valid_subject() -> Optional[Path]:
+    for subject_dir in build_subject_dirs():
+        ref_video = subject_dir / REFERENCE_VIDEO_NAME
+        expected_file = subject_dir / EXPECTED_FILE_NAME
+        if ref_video.exists() and expected_file.exists():
+            return subject_dir
+    return None
+
+
+def find_first_available_category_video(subject_dir: Path) -> Tuple[Optional[str], Optional[Path]]:
+    for category, filename in CATEGORY_FILES.items():
+        video_path = subject_dir / filename
+        if video_path.exists():
+            return category, video_path
+    return None, None
+
+
+def run_dry_run_faithful(
+    model_path: Path,
+    show: bool,
+    min_closed_frames: int,
+    max_closed_frames: int,
+):
+    subject_dir = find_first_valid_subject()
+    if subject_dir is None:
+        raise FileNotFoundError(
+            f"Aucun dossier sujet valide trouvé dans {VIDEO_ROOT} "
+            f"(il faut au minimum {REFERENCE_VIDEO_NAME} et {EXPECTED_FILE_NAME})."
+        )
+
+    subject_id = subject_dir.name
+    ref_video = subject_dir / REFERENCE_VIDEO_NAME
+    expected_file = subject_dir / EXPECTED_FILE_NAME
+    expected_blinks = read_expected_blinks(expected_file)
+
+    category_name, category_video = find_first_available_category_video(subject_dir)
+
+    print(f"[DRY RUN faithful] Sujet test: {subject_id}")
+    print(f"[DRY RUN faithful] Etalon: {ref_video}")
+    if category_video is not None:
+        print(f"[DRY RUN faithful] Vidéo affichée: {category_name} -> {category_video}")
+    else:
+        print("[DRY RUN faithful] Aucune vidéo de catégorie trouvée, affichage de l'étalon.")
+
+    # Etape 1 : étalon exactement comme en real_run
+    ref_result = analyze_video_one_pass(
+        model_path=model_path,
+        video_path=ref_video,
+        profile=None,
+        thresholds={
+            "close_threshold": DEFAULT_CLOSE_THRESHOLD,
+            "open_threshold": DEFAULT_OPEN_THRESHOLD,
+        },
+        min_closed_frames=min_closed_frames,
+        max_closed_frames=max_closed_frames,
+        show=False,
+        dynamic_normalization=False,
+    )
+
+    ears = ref_result.get("ears")
+    if ears is None or np.isfinite(ears).sum() < 10:
+        raise RuntimeError("Vidéo étalon invalide (pas assez de détection visage).")
+
+    profile = build_profile_from_reference_ears(ears)
+    ref_norm = normalize_series_static(ref_result["ears"], profile)
+    ref_norm = median_filter_nan(ref_norm, k=SMOOTH_KERNEL)
+
+    thresholds = calibrate_thresholds_on_reference(
+        norm_ears=ref_norm,
+        fps=ref_result["fps"],
+        expected_blinks=expected_blinks,
+        min_closed_frames=min_closed_frames,
+        max_closed_frames=max_closed_frames,
+    )
+
+    target_video = category_video if category_video is not None else ref_video
+    target_name = category_name if category_name is not None else "étalon"
+
+    # Etape 2 : analyse/affichage avec exactement le profil + seuils batch
+    shown_result = analyze_video_one_pass(
+        model_path=model_path,
+        video_path=target_video,
+        profile=profile,
+        thresholds=thresholds,
+        min_closed_frames=min_closed_frames,
+        max_closed_frames=max_closed_frames,
+        show=show,
+        dynamic_normalization=False,
+    )
+
+    print("\n--- DRY RUN faithful RESULT ---")
+    print(f"Sujet               : {subject_id}")
+    print(f"Vidéo affichée      : {target_name}")
+    print(f"EAR open ref        : {profile['ear_open_ref']:.4f}")
+    print(f"EAR closed ref      : {profile['ear_closed_ref']:.4f}")
+    print(f"Close threshold     : {thresholds['close_threshold']:.2f}")
+    print(f"Open threshold      : {thresholds['open_threshold']:.2f}")
+    print(f"Etalon attendu      : {expected_blinks}")
+    print(f"Etalon prédit       : {thresholds['predicted_reference_blinks']}")
+    print(f"Clignements détectés: {shown_result['blink_count']}")
+    print(f"Clign./minute       : {format_optional_float(shown_result['blinks_per_minute'], 1)}")
+    print(f"Face detect rate    : {shown_result['face_detect_rate']:.4f}")
+    print(f"Temps vidéo         : {shown_result['elapsed_seconds']:.2f} s")
+
+
+def run_dry_run_dynamic(
     model_path: Path,
     show: bool,
     min_closed_frames: int,
@@ -700,8 +787,8 @@ def run_dry_run(
 
     video_path = dry_videos[0]
 
-    print(f"[DRY RUN] Vidéo test: {video_path}")
-    print("[DRY RUN] Mode une seule passe. Normalisation dynamique.")
+    print(f"[DRY RUN dynamic] Vidéo test: {video_path}")
+    print("[DRY RUN dynamic] Mode une seule passe. Normalisation dynamique.")
 
     result = analyze_video_one_pass(
         model_path=model_path,
@@ -725,7 +812,7 @@ def run_dry_run(
         norm_p05 = float("nan")
         norm_p95 = float("nan")
 
-    print("\n--- DRY RUN RESULT ---")
+    print("\n--- DRY RUN dynamic RESULT ---")
     print(f"Vidéo               : {video_path}")
     print(f"Frames traitées     : {result['processed_frames']}")
     print(f"Face detect rate    : {result['face_detect_rate']:.3f}")
@@ -735,6 +822,31 @@ def run_dry_run(
     print(f"Clignements détectés: {result['blink_count']}")
     print(f"Clign./minute       : {format_optional_float(result['blinks_per_minute'], 1)}")
     print(f"Temps vidéo         : {result['elapsed_seconds']:.2f} s")
+
+
+def run_dry_run(
+    model_path: Path,
+    show: bool,
+    min_closed_frames: int,
+    max_closed_frames: int,
+    mode: str,
+):
+    if mode == "faithful":
+        run_dry_run_faithful(
+            model_path=model_path,
+            show=show,
+            min_closed_frames=min_closed_frames,
+            max_closed_frames=max_closed_frames,
+        )
+    elif mode == "dynamic":
+        run_dry_run_dynamic(
+            model_path=model_path,
+            show=show,
+            min_closed_frames=min_closed_frames,
+            max_closed_frames=max_closed_frames,
+        )
+    else:
+        raise ValueError(f"Mode dry-run inconnu: {mode}")
 
 
 # ============================================================
@@ -747,10 +859,7 @@ def run_real(
     min_closed_frames: int,
     max_closed_frames: int,
 ):
-    subject_dirs = [
-        p for p in sorted(VIDEO_ROOT.iterdir())
-        if p.is_dir() and p.name != "dry"
-    ]
+    subject_dirs = build_subject_dirs()
 
     if not subject_dirs:
         raise FileNotFoundError(f"Aucun dossier sujet trouvé dans {VIDEO_ROOT}")
@@ -780,7 +889,6 @@ def run_real(
             print(f"  - ignoré: lecture attendu.txt impossible ({exc})")
             continue
 
-        # 1 seul passage sur la vidéo étalon
         try:
             ref_result = analyze_video_one_pass(
                 model_path=model_path,
@@ -846,22 +954,16 @@ def run_real(
                 f"open_ref={profile['ear_open_ref']:.3f}, "
                 f"closed_ref={profile['ear_closed_ref']:.3f}, "
             )
-            if relative_error is not None:
-                calib_msg += f"err_rel={relative_error:.4f}"
-            else:
-                calib_msg += "err_rel=NA"
+            calib_msg += f"err_rel={relative_error:.4f}" if relative_error is not None else "err_rel=NA"
             print(calib_msg)
 
         except Exception as exc:
             print(f"  - erreur calibration: {exc}")
             continue
 
-        # CSV complet
         row = {"subject": subject_id}
-        # CSV essentiel
         essential_row = {"subject": subject_id}
 
-        # Ajouter l'étalon dans les deux CSV
         row["étalon"] = ref_result["blink_count"]
         row["étalon mean"] = format_optional_float(ref_result["blink_interval_mean"], 3)
         row["étalon low"] = format_optional_float(ref_result["blink_interval_min"], 3)
@@ -892,7 +994,6 @@ def run_real(
                 row[f"{category} Face Detect Rate"] = ""
 
                 essential_row[category] = ""
-
                 print(f"  - {category}: absent")
                 continue
 
@@ -936,13 +1037,11 @@ def run_real(
                 row[f"{category} Face Detect Rate"] = ""
 
                 essential_row[category] = ""
-
                 print(f"  - {category}: erreur ({exc})")
 
         rows.append(row)
         essential_rows.append(essential_row)
 
-    # CSV complet
     fieldnames = ["subject"]
     fieldnames.extend(full_metric_fields("étalon"))
     for category in CATEGORY_FILES.keys():
@@ -953,7 +1052,6 @@ def run_real(
         writer.writeheader()
         writer.writerows(rows)
 
-    # CSV essentiel : uniquement clignements/minute
     essential_fieldnames = ["subject", "étalon"] + list(CATEGORY_FILES.keys())
     with open(ESSENTIAL_OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=essential_fieldnames)
@@ -1007,6 +1105,12 @@ def main():
         help="true par défaut. Passer false pour lancer le real run.",
     )
     parser.add_argument(
+        "--dry-run-mode",
+        choices=["faithful", "dynamic"],
+        default="faithful",
+        help="Mode dry run: 'faithful' (par défaut, fidèle au batch) ou 'dynamic' (ancien mode sur video/dry).",
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Affiche la vidéo annotée. Autorisé uniquement en dry run.",
@@ -1048,6 +1152,7 @@ def main():
             show=args.show,
             min_closed_frames=args.min_closed_frames,
             max_closed_frames=args.max_closed_frames,
+            mode=args.dry_run_mode,
         )
     else:
         run_real(
