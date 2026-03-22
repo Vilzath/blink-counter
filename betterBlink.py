@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-os.environ["GLOG_minloglevel"] = "2"   # 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import argparse
 import csv
@@ -31,6 +30,7 @@ DRY_RUN_DIR = VIDEO_ROOT / "dry"
 REFERENCE_VIDEO_NAME = "etalon.mp4"
 EXPECTED_FILE_NAME = "attendu.txt"
 ERROR_REPORT_FILE = Path("Erreur relative.txt")
+ESSENTIAL_OUTPUT_CSV = Path("Essential.csv")
 
 # Colonnes CSV / catégories analysées.
 # Modifie simplement cette table.
@@ -260,6 +260,17 @@ def compute_blinks_per_minute(blink_count: int, duration_seconds: float) -> Opti
     if duration_seconds is None or duration_seconds <= 0:
         return None
     return float((blink_count * 60.0) / duration_seconds)
+
+
+def full_metric_fields(base_name: str) -> List[str]:
+    return [
+        base_name,
+        f"{base_name} mean",
+        f"{base_name} low",
+        f"{base_name} high",
+        f"{base_name} per minute",
+        f"{base_name} Face Detect Rate",
+    ]
 
 
 # ============================================================
@@ -745,6 +756,7 @@ def run_real(
         raise FileNotFoundError(f"Aucun dossier sujet trouvé dans {VIDEO_ROOT}")
 
     rows = []
+    essential_rows = []
     reference_errors = []
 
     for subject_dir in subject_dirs:
@@ -781,7 +793,7 @@ def run_real(
                 min_closed_frames=min_closed_frames,
                 max_closed_frames=max_closed_frames,
                 show=False,
-                dynamic_normalization=False,  # on veut juste les EAR bruts
+                dynamic_normalization=False,
             )
             print(
                 f"  - étalon analysé en {ref_result['elapsed_seconds']:.2f} s "
@@ -844,7 +856,29 @@ def run_real(
             print(f"  - erreur calibration: {exc}")
             continue
 
+        # CSV complet
         row = {"subject": subject_id}
+        # CSV essentiel
+        essential_row = {"subject": subject_id}
+
+        # Ajouter l'étalon dans les deux CSV
+        row["étalon"] = ref_result["blink_count"]
+        row["étalon mean"] = format_optional_float(ref_result["blink_interval_mean"], 3)
+        row["étalon low"] = format_optional_float(ref_result["blink_interval_min"], 3)
+        row["étalon high"] = format_optional_float(ref_result["blink_interval_max"], 3)
+        row["étalon per minute"] = format_optional_float(ref_result["blinks_per_minute"], 1)
+        row["étalon Face Detect Rate"] = f"{ref_result['face_detect_rate']:.4f}"
+
+        essential_row["étalon"] = format_optional_float(ref_result["blinks_per_minute"], 1)
+
+        print(
+            f"  - étalon stats: {ref_result['blink_count']} | "
+            f"mean={ref_result['blink_interval_mean'] if ref_result['blink_interval_mean'] is not None else 'NA'} | "
+            f"low={ref_result['blink_interval_min'] if ref_result['blink_interval_min'] is not None else 'NA'} | "
+            f"high={ref_result['blink_interval_max'] if ref_result['blink_interval_max'] is not None else 'NA'} | "
+            f"per_min={format_optional_float(ref_result['blinks_per_minute'], 1) if ref_result['blinks_per_minute'] is not None else 'NA'} | "
+            f"Face Detect Rate={ref_result['face_detect_rate']:.4f}"
+        )
 
         for category, filename in CATEGORY_FILES.items():
             video_path = subject_dir / filename
@@ -856,6 +890,9 @@ def run_real(
                 row[f"{category} high"] = ""
                 row[f"{category} per minute"] = ""
                 row[f"{category} Face Detect Rate"] = ""
+
+                essential_row[category] = ""
+
                 print(f"  - {category}: absent")
                 continue
 
@@ -878,6 +915,8 @@ def run_real(
                 row[f"{category} per minute"] = format_optional_float(result["blinks_per_minute"], 1)
                 row[f"{category} Face Detect Rate"] = f"{result['face_detect_rate']:.4f}"
 
+                essential_row[category] = format_optional_float(result["blinks_per_minute"], 1)
+
                 print(
                     f"  - {category}: {result['blink_count']} | "
                     f"mean={result['blink_interval_mean'] if result['blink_interval_mean'] is not None else 'NA'} | "
@@ -895,30 +934,37 @@ def run_real(
                 row[f"{category} high"] = ""
                 row[f"{category} per minute"] = ""
                 row[f"{category} Face Detect Rate"] = ""
+
+                essential_row[category] = ""
+
                 print(f"  - {category}: erreur ({exc})")
 
         rows.append(row)
+        essential_rows.append(essential_row)
 
+    # CSV complet
     fieldnames = ["subject"]
+    fieldnames.extend(full_metric_fields("étalon"))
     for category in CATEGORY_FILES.keys():
-        fieldnames.extend([
-            category,
-            f"{category} mean",
-            f"{category} low",
-            f"{category} high",
-            f"{category} per minute",
-            f"{category} Face Detect Rate",
-        ])
+        fieldnames.extend(full_metric_fields(category))
 
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
+    # CSV essentiel : uniquement clignements/minute
+    essential_fieldnames = ["subject", "étalon"] + list(CATEGORY_FILES.keys())
+    with open(ESSENTIAL_OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=essential_fieldnames)
+        writer.writeheader()
+        writer.writerows(essential_rows)
+
     metrics = compute_reference_error_metrics(reference_errors)
     write_reference_error_report(ERROR_REPORT_FILE, reference_errors, metrics)
 
     print(f"\nCSV écrit: {output_csv}")
+    print(f"CSV essentiel écrit: {ESSENTIAL_OUTPUT_CSV}")
     print(f"Rapport erreur écrit: {ERROR_REPORT_FILE}")
 
     if metrics["n_subjects"] > 0:
@@ -968,7 +1014,7 @@ def main():
     parser.add_argument(
         "--csv",
         default=DEFAULT_OUTPUT_CSV,
-        help=f"CSV de sortie pour le real run (défaut: {DEFAULT_OUTPUT_CSV})",
+        help=f"CSV de sortie principal pour le real run (défaut: {DEFAULT_OUTPUT_CSV})",
     )
     parser.add_argument(
         "--min-closed-frames",
