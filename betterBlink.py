@@ -31,6 +31,7 @@ REFERENCE_VIDEO_NAME = "etalon.mp4"
 EXPECTED_FILE_NAME = "attendu.txt"
 ERROR_REPORT_FILE = Path("Erreur relative.txt")
 ESSENTIAL_OUTPUT_CSV = Path("Essential.csv")
+DETAILS_OUTPUT_CSV = Path("details_EAR.csv")
 
 # Colonnes CSV / catégories analysées.
 # Modifie simplement cette table.
@@ -62,6 +63,9 @@ DRY_SHOW_WARMUP_VALID_FRAMES = 30
 
 # Lissage médian simple
 SMOOTH_KERNEL = 3
+
+# Découpage deepData
+DEEPDATA_STEP_FRAMES = 15
 
 
 # ============================================================
@@ -134,6 +138,11 @@ def read_expected_blinks(expected_file: Path) -> int:
 
 
 def compute_blink_interval_stats(blink_timestamps: List[float]) -> Dict[str, Optional[float]]:
+    """
+    Calcule les écarts entre clignements successifs.
+    Retourne des secondes.
+    Si moins de 2 clignements, les stats d'intervalle sont indisponibles.
+    """
     if blink_timestamps is None or len(blink_timestamps) < 2:
         return {
             "mean_interval": None,
@@ -159,6 +168,12 @@ def compute_blink_interval_stats(blink_timestamps: List[float]) -> Dict[str, Opt
 
 
 def compute_reference_error_metrics(reference_errors: List[Dict]) -> Dict[str, Optional[float]]:
+    """
+    Calcule les métriques globales sur les vidéos étalon disponibles.
+    - relative_mean_error : moyenne de |pred - expected| / expected
+    - mean_bias : moyenne de (pred - expected)
+    - error_std : écart-type de (pred - expected)
+    """
     if not reference_errors:
         return {
             "n_subjects": 0,
@@ -260,6 +275,81 @@ def build_subject_dirs() -> List[Path]:
 
 
 # ============================================================
+# Deep data helpers
+# ============================================================
+
+def denormalize_threshold(norm_threshold: float, profile: Optional[Dict]) -> Optional[float]:
+    if profile is None:
+        return None
+    return profile["ear_closed_ref"] + norm_threshold * (
+        profile["ear_open_ref"] - profile["ear_closed_ref"]
+    )
+
+
+def sample_series(values: np.ndarray, step: int) -> List[str]:
+    out = []
+    for i in range(0, len(values), step):
+        v = values[i]
+        out.append("" if not np.isfinite(v) else f"{v:.3f}")
+    return out
+
+
+def sample_states(states: List[str], step: int) -> List[str]:
+    out = []
+    for i in range(0, len(states), step):
+        out.append(states[i] if i < len(states) else "")
+    return out
+
+
+def append_deepdata_rows(
+    deep_rows: List[List[str]],
+    video_label: str,
+    profile: Optional[Dict],
+    thresholds: Dict,
+    ears: np.ndarray,
+    norm_ears: np.ndarray,
+    states: List[str],
+):
+    low_ear = denormalize_threshold(thresholds["close_threshold"], profile)
+    high_ear = denormalize_threshold(thresholds["open_threshold"], profile)
+
+    ear_row = [
+        video_label,
+        "" if low_ear is None else f"{low_ear:.3f}",
+        "" if high_ear is None else f"{high_ear:.3f}",
+    ] + sample_series(ears, DEEPDATA_STEP_FRAMES)
+
+    norm_row = [
+        "",
+        f"{thresholds['close_threshold']:.3f}",
+        f"{thresholds['open_threshold']:.3f}",
+    ] + sample_series(norm_ears, DEEPDATA_STEP_FRAMES)
+
+    state_row = ["", "", ""] + sample_states(states, DEEPDATA_STEP_FRAMES)
+
+    deep_rows.append(ear_row)
+    deep_rows.append(norm_row)
+    deep_rows.append(state_row)
+
+
+def write_deepdata_csv(deep_rows: List[List[str]], output_path: Path):
+    if not deep_rows:
+        return
+
+    max_len = max(len(r) for r in deep_rows)
+    headers = ["Nomdedossier/nom_video", "Seuil bas EAR", "Seuil haut EAR"]
+    n_time_cols = max_len - 3
+    headers.extend([f"frame_{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for row in deep_rows:
+            padded = row + [""] * (max_len - len(row))
+            writer.writerow(padded)
+
+
+# ============================================================
 # MediaPipe
 # ============================================================
 
@@ -342,12 +432,16 @@ class OnlineBlinkDetector:
 
         self.blink_count = 0
         self.blink_timestamps: List[float] = []
+        self.blink_states: List[str] = []
 
     def update(self, value: Optional[float], frame_idx: int):
+        state = "o"
+
         if value is None or not np.isfinite(value):
             self.in_closed = False
             self.closed_start_frame = None
             self.closed_len = 0
+            self.blink_states.append(state)
             return
 
         if not self.in_closed:
@@ -355,8 +449,11 @@ class OnlineBlinkDetector:
                 self.in_closed = True
                 self.closed_start_frame = frame_idx
                 self.closed_len = 1
+                state = "-"
         else:
             self.closed_len += 1
+            state = "+"
+
             if value > self.open_threshold:
                 if self.min_closed_frames <= self.closed_len <= self.max_closed_frames:
                     self.blink_count += 1
@@ -366,6 +463,9 @@ class OnlineBlinkDetector:
                 self.in_closed = False
                 self.closed_start_frame = None
                 self.closed_len = 0
+                state = "o"
+
+        self.blink_states.append(state)
 
 
 # ============================================================
@@ -653,6 +753,7 @@ def analyze_video_one_pass(
         "face_detect_rate": float(valid_frames / frame_idx) if frame_idx > 0 else 0.0,
         "blink_count": int(detector.blink_count),
         "blink_timestamps": detector.blink_timestamps,
+        "blink_states": detector.blink_states,
         "blink_interval_mean": interval_stats["mean_interval"],
         "blink_interval_min": interval_stats["min_interval"],
         "blink_interval_max": interval_stats["max_interval"],
@@ -689,6 +790,8 @@ def run_dry_run_faithful(
     show: bool,
     min_closed_frames: int,
     max_closed_frames: int,
+    deepData: bool,
+    deep_rows: List[List[str]],
 ):
     subject_dir = find_first_valid_subject()
     if subject_dir is None:
@@ -711,7 +814,6 @@ def run_dry_run_faithful(
     else:
         print("[DRY RUN faithful] Aucune vidéo de catégorie trouvée, affichage de l'étalon.")
 
-    # Etape 1 : étalon exactement comme en real_run
     ref_result = analyze_video_one_pass(
         model_path=model_path,
         video_path=ref_video,
@@ -742,10 +844,20 @@ def run_dry_run_faithful(
         max_closed_frames=max_closed_frames,
     )
 
+    if deepData:
+        append_deepdata_rows(
+            deep_rows=deep_rows,
+            video_label=f"{subject_id}/{ref_video.name}",
+            profile=profile,
+            thresholds=thresholds,
+            ears=ref_result["ears"],
+            norm_ears=ref_norm,
+            states=["o"] * len(ref_result["ears"]),
+        )
+
     target_video = category_video if category_video is not None else ref_video
     target_name = category_name if category_name is not None else "étalon"
 
-    # Etape 2 : analyse/affichage avec exactement le profil + seuils batch
     shown_result = analyze_video_one_pass(
         model_path=model_path,
         video_path=target_video,
@@ -756,6 +868,17 @@ def run_dry_run_faithful(
         show=show,
         dynamic_normalization=False,
     )
+
+    if deepData:
+        append_deepdata_rows(
+            deep_rows=deep_rows,
+            video_label=f"{subject_id}/{target_video.name}",
+            profile=profile,
+            thresholds=thresholds,
+            ears=shown_result["ears"],
+            norm_ears=shown_result["norm_ears"],
+            states=shown_result["blink_states"],
+        )
 
     print("\n--- DRY RUN faithful RESULT ---")
     print(f"Sujet               : {subject_id}")
@@ -777,6 +900,8 @@ def run_dry_run_dynamic(
     show: bool,
     min_closed_frames: int,
     max_closed_frames: int,
+    deepData: bool,
+    deep_rows: List[List[str]],
 ):
     if not DRY_RUN_DIR.exists():
         raise FileNotFoundError(f"Dossier dry introuvable: {DRY_RUN_DIR}")
@@ -812,6 +937,21 @@ def run_dry_run_dynamic(
         norm_p05 = float("nan")
         norm_p95 = float("nan")
 
+    if deepData:
+        # mode dynamique : seuils EAR pas vraiment définis à partir d'un profil fixe
+        append_deepdata_rows(
+            deep_rows=deep_rows,
+            video_label=f"dry/{video_path.name}",
+            profile=None,
+            thresholds={
+                "close_threshold": DEFAULT_CLOSE_THRESHOLD,
+                "open_threshold": DEFAULT_OPEN_THRESHOLD,
+            },
+            ears=result["ears"],
+            norm_ears=result["norm_ears"],
+            states=result["blink_states"],
+        )
+
     print("\n--- DRY RUN dynamic RESULT ---")
     print(f"Vidéo               : {video_path}")
     print(f"Frames traitées     : {result['processed_frames']}")
@@ -830,6 +970,8 @@ def run_dry_run(
     min_closed_frames: int,
     max_closed_frames: int,
     mode: str,
+    deepData: bool,
+    deep_rows: List[List[str]],
 ):
     if mode == "faithful":
         run_dry_run_faithful(
@@ -837,6 +979,8 @@ def run_dry_run(
             show=show,
             min_closed_frames=min_closed_frames,
             max_closed_frames=max_closed_frames,
+            deepData=deepData,
+            deep_rows=deep_rows,
         )
     elif mode == "dynamic":
         run_dry_run_dynamic(
@@ -844,6 +988,8 @@ def run_dry_run(
             show=show,
             min_closed_frames=min_closed_frames,
             max_closed_frames=max_closed_frames,
+            deepData=deepData,
+            deep_rows=deep_rows,
         )
     else:
         raise ValueError(f"Mode dry-run inconnu: {mode}")
@@ -858,6 +1004,8 @@ def run_real(
     output_csv: Path,
     min_closed_frames: int,
     max_closed_frames: int,
+    deepData: bool,
+    deep_rows: List[List[str]],
 ):
     subject_dirs = build_subject_dirs()
 
@@ -961,6 +1109,17 @@ def run_real(
             print(f"  - erreur calibration: {exc}")
             continue
 
+        if deepData:
+            append_deepdata_rows(
+                deep_rows=deep_rows,
+                video_label=f"{subject_id}/{ref_video.name}",
+                profile=profile,
+                thresholds=thresholds,
+                ears=ref_result["ears"],
+                norm_ears=ref_norm,
+                states=["o"] * len(ref_result["ears"]),
+            )
+
         row = {"subject": subject_id}
         essential_row = {"subject": subject_id}
 
@@ -1008,6 +1167,17 @@ def run_real(
                     show=False,
                     dynamic_normalization=False,
                 )
+
+                if deepData:
+                    append_deepdata_rows(
+                        deep_rows=deep_rows,
+                        video_label=f"{subject_id}/{video_path.name}",
+                        profile=profile,
+                        thresholds=thresholds,
+                        ears=result["ears"],
+                        norm_ears=result["norm_ears"],
+                        states=result["blink_states"],
+                    )
 
                 row[category] = result["blink_count"]
                 row[f"{category} mean"] = format_optional_float(result["blink_interval_mean"], 3)
@@ -1116,6 +1286,12 @@ def main():
         help="Affiche la vidéo annotée. Autorisé uniquement en dry run.",
     )
     parser.add_argument(
+        "--deepData",
+        type=str2bool,
+        default=False,
+        help="false par défaut. Génère details_EAR.csv avec EAR, EAR normalisé et état blink toutes les 15 frames.",
+    )
+    parser.add_argument(
         "--csv",
         default=DEFAULT_OUTPUT_CSV,
         help=f"CSV de sortie principal pour le real run (défaut: {DEFAULT_OUTPUT_CSV})",
@@ -1137,6 +1313,7 @@ def main():
 
     model_path = Path(args.model)
     output_csv = Path(args.csv)
+    deep_rows: List[List[str]] = []
 
     if not model_path.exists():
         raise FileNotFoundError(f"Modèle introuvable: {model_path}")
@@ -1153,6 +1330,8 @@ def main():
             min_closed_frames=args.min_closed_frames,
             max_closed_frames=args.max_closed_frames,
             mode=args.dry_run_mode,
+            deepData=args.deepData,
+            deep_rows=deep_rows,
         )
     else:
         run_real(
@@ -1160,7 +1339,13 @@ def main():
             output_csv=output_csv,
             min_closed_frames=args.min_closed_frames,
             max_closed_frames=args.max_closed_frames,
+            deepData=args.deepData,
+            deep_rows=deep_rows,
         )
+
+    if args.deepData:
+        write_deepdata_csv(deep_rows, DETAILS_OUTPUT_CSV)
+        print(f"Deep data écrit: {DETAILS_OUTPUT_CSV}")
 
     elapsed = time.perf_counter() - t0
     print(f"\nTemps total d'exécution : {elapsed:.2f} s")
