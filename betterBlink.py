@@ -31,7 +31,11 @@ REFERENCE_VIDEO_NAME = "etalon.mp4"
 EXPECTED_FILE_NAME = "attendu.txt"
 ERROR_REPORT_FILE = Path("Erreur relative.txt")
 ESSENTIAL_OUTPUT_CSV = Path("Essential.csv")
-DETAILS_OUTPUT_CSV = Path("details_EAR.csv")
+
+# Deep data outputs
+DETAIL_OUTPUT_CSV = Path("detail.csv")
+DETAIL_EAR_OUTPUT_CSV = Path("detailEAR.csv")
+DETAIL_EARNORM_OUTPUT_CSV = Path("detailEARNorm.csv")
 
 # Colonnes CSV / catégories analysées.
 # Modifie simplement cette table.
@@ -48,8 +52,8 @@ DEFAULT_OUTPUT_CSV = "results.csv"
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
-DEFAULT_MIN_CLOSED_FRAMES = 2
-DEFAULT_MAX_CLOSED_FRAMES = 12
+DEFAULT_MIN_CLOSED_FRAMES = 1
+DEFAULT_MAX_CLOSED_FRAMES = 16
 
 OPEN_PERCENTILE = 95
 CLOSED_PERCENTILE = 5
@@ -65,7 +69,7 @@ DRY_SHOW_WARMUP_VALID_FRAMES = 30
 SMOOTH_KERNEL = 3
 
 # Découpage deepData
-DEEPDATA_STEP_FRAMES = 15
+DEEPDATA_STEP_FRAMES = 1
 
 
 # ============================================================
@@ -303,6 +307,8 @@ def sample_states(states: List[str], step: int) -> List[str]:
 
 def append_deepdata_rows(
     deep_rows: List[List[str]],
+    deep_ear_rows: List[List[str]],
+    deep_ear_norm_rows: List[List[str]],
     video_label: str,
     profile: Optional[Dict],
     thresholds: Dict,
@@ -313,6 +319,7 @@ def append_deepdata_rows(
     low_ear = denormalize_threshold(thresholds["close_threshold"], profile)
     high_ear = denormalize_threshold(thresholds["open_threshold"], profile)
 
+    # detail.csv : 3 lignes par vidéo
     ear_row = [
         video_label,
         "" if low_ear is None else f"{low_ear:.3f}",
@@ -331,20 +338,47 @@ def append_deepdata_rows(
     deep_rows.append(norm_row)
     deep_rows.append(state_row)
 
+    # detailEAR.csv : 1 ligne par vidéo, pas de seuils
+    deep_ear_rows.append(
+        [video_label] + sample_series(ears, DEEPDATA_STEP_FRAMES)
+    )
 
-def write_deepdata_csv(deep_rows: List[List[str]], output_path: Path):
-    if not deep_rows:
+    # detailEARNorm.csv : 1 ligne par vidéo, pas de seuils
+    deep_ear_norm_rows.append(
+        [video_label] + sample_series(norm_ears, DEEPDATA_STEP_FRAMES)
+    )
+
+
+def write_detail_csv(detail_rows: List[List[str]], output_path: Path):
+    if not detail_rows:
         return
 
-    max_len = max(len(r) for r in deep_rows)
+    max_len = max(len(r) for r in detail_rows)
     headers = ["Nomdedossier/nom_video", "Seuil bas EAR", "Seuil haut EAR"]
     n_time_cols = max_len - 3
-    headers.extend([f"frame_{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
+    headers.extend([f"{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(headers)
-        for row in deep_rows:
+        for row in detail_rows:
+            padded = row + [""] * (max_len - len(row))
+            writer.writerow(padded)
+
+
+def write_detail_series_csv(series_rows: List[List[str]], output_path: Path):
+    if not series_rows:
+        return
+
+    max_len = max(len(r) for r in series_rows)
+    headers = ["Nomdedossier/nom_video"]
+    n_time_cols = max_len - 1
+    headers.extend([f"{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for row in series_rows:
             padded = row + [""] * (max_len - len(row))
             writer.writerow(padded)
 
@@ -792,6 +826,8 @@ def run_dry_run_faithful(
     max_closed_frames: int,
     deepData: bool,
     deep_rows: List[List[str]],
+    deep_ear_rows: List[List[str]],
+    deep_ear_norm_rows: List[List[str]],
 ):
     subject_dir = find_first_valid_subject()
     if subject_dir is None:
@@ -847,6 +883,8 @@ def run_dry_run_faithful(
     if deepData:
         append_deepdata_rows(
             deep_rows=deep_rows,
+            deep_ear_rows=deep_ear_rows,
+            deep_ear_norm_rows=deep_ear_norm_rows,
             video_label=f"{subject_id}/{ref_video.name}",
             profile=profile,
             thresholds=thresholds,
@@ -872,6 +910,8 @@ def run_dry_run_faithful(
     if deepData:
         append_deepdata_rows(
             deep_rows=deep_rows,
+            deep_ear_rows=deep_ear_rows,
+            deep_ear_norm_rows=deep_ear_norm_rows,
             video_label=f"{subject_id}/{target_video.name}",
             profile=profile,
             thresholds=thresholds,
@@ -902,6 +942,8 @@ def run_dry_run_dynamic(
     max_closed_frames: int,
     deepData: bool,
     deep_rows: List[List[str]],
+    deep_ear_rows: List[List[str]],
+    deep_ear_norm_rows: List[List[str]],
 ):
     if not DRY_RUN_DIR.exists():
         raise FileNotFoundError(f"Dossier dry introuvable: {DRY_RUN_DIR}")
@@ -938,9 +980,10 @@ def run_dry_run_dynamic(
         norm_p95 = float("nan")
 
     if deepData:
-        # mode dynamique : seuils EAR pas vraiment définis à partir d'un profil fixe
         append_deepdata_rows(
             deep_rows=deep_rows,
+            deep_ear_rows=deep_ear_rows,
+            deep_ear_norm_rows=deep_ear_norm_rows,
             video_label=f"dry/{video_path.name}",
             profile=None,
             thresholds={
@@ -972,6 +1015,8 @@ def run_dry_run(
     mode: str,
     deepData: bool,
     deep_rows: List[List[str]],
+    deep_ear_rows: List[List[str]],
+    deep_ear_norm_rows: List[List[str]],
 ):
     if mode == "faithful":
         run_dry_run_faithful(
@@ -981,6 +1026,8 @@ def run_dry_run(
             max_closed_frames=max_closed_frames,
             deepData=deepData,
             deep_rows=deep_rows,
+            deep_ear_rows=deep_ear_rows,
+            deep_ear_norm_rows=deep_ear_norm_rows,
         )
     elif mode == "dynamic":
         run_dry_run_dynamic(
@@ -990,6 +1037,8 @@ def run_dry_run(
             max_closed_frames=max_closed_frames,
             deepData=deepData,
             deep_rows=deep_rows,
+            deep_ear_rows=deep_ear_rows,
+            deep_ear_norm_rows=deep_ear_norm_rows,
         )
     else:
         raise ValueError(f"Mode dry-run inconnu: {mode}")
@@ -1006,6 +1055,8 @@ def run_real(
     max_closed_frames: int,
     deepData: bool,
     deep_rows: List[List[str]],
+    deep_ear_rows: List[List[str]],
+    deep_ear_norm_rows: List[List[str]],
 ):
     subject_dirs = build_subject_dirs()
 
@@ -1112,6 +1163,8 @@ def run_real(
         if deepData:
             append_deepdata_rows(
                 deep_rows=deep_rows,
+                deep_ear_rows=deep_ear_rows,
+                deep_ear_norm_rows=deep_ear_norm_rows,
                 video_label=f"{subject_id}/{ref_video.name}",
                 profile=profile,
                 thresholds=thresholds,
@@ -1171,6 +1224,8 @@ def run_real(
                 if deepData:
                     append_deepdata_rows(
                         deep_rows=deep_rows,
+                        deep_ear_rows=deep_ear_rows,
+                        deep_ear_norm_rows=deep_ear_norm_rows,
                         video_label=f"{subject_id}/{video_path.name}",
                         profile=profile,
                         thresholds=thresholds,
@@ -1289,7 +1344,7 @@ def main():
         "--deepData",
         type=str2bool,
         default=False,
-        help="false par défaut. Génère details_EAR.csv avec EAR, EAR normalisé et état blink toutes les 15 frames.",
+        help="false par défaut. Génère detail.csv, detailEAR.csv et detailEARNorm.csv.",
     )
     parser.add_argument(
         "--csv",
@@ -1313,7 +1368,10 @@ def main():
 
     model_path = Path(args.model)
     output_csv = Path(args.csv)
+
     deep_rows: List[List[str]] = []
+    deep_ear_rows: List[List[str]] = []
+    deep_ear_norm_rows: List[List[str]] = []
 
     if not model_path.exists():
         raise FileNotFoundError(f"Modèle introuvable: {model_path}")
@@ -1332,6 +1390,8 @@ def main():
             mode=args.dry_run_mode,
             deepData=args.deepData,
             deep_rows=deep_rows,
+            deep_ear_rows=deep_ear_rows,
+            deep_ear_norm_rows=deep_ear_norm_rows,
         )
     else:
         run_real(
@@ -1341,11 +1401,17 @@ def main():
             max_closed_frames=args.max_closed_frames,
             deepData=args.deepData,
             deep_rows=deep_rows,
+            deep_ear_rows=deep_ear_rows,
+            deep_ear_norm_rows=deep_ear_norm_rows,
         )
 
     if args.deepData:
-        write_deepdata_csv(deep_rows, DETAILS_OUTPUT_CSV)
-        print(f"Deep data écrit: {DETAILS_OUTPUT_CSV}")
+        write_detail_csv(deep_rows, DETAIL_OUTPUT_CSV)
+        write_detail_series_csv(deep_ear_rows, DETAIL_EAR_OUTPUT_CSV)
+        write_detail_series_csv(deep_ear_norm_rows, DETAIL_EARNORM_OUTPUT_CSV)
+        print(f"Deep data écrit: {DETAIL_OUTPUT_CSV}")
+        print(f"Deep data EAR écrit: {DETAIL_EAR_OUTPUT_CSV}")
+        print(f"Deep data EARNorm écrit: {DETAIL_EARNORM_OUTPUT_CSV}")
 
     elapsed = time.perf_counter() - t0
     print(f"\nTemps total d'exécution : {elapsed:.2f} s")
