@@ -8,6 +8,7 @@ import argparse
 import csv
 import math
 import time
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -40,6 +41,7 @@ DETAIL_EARNORM_OUTPUT_CSV = Path("detailEARNorm.csv")
 # Colonnes CSV / catégories analysées.
 # Modifie simplement cette table.
 CATEGORY_FILES = {
+    "Etalon": REFERENCE_VIDEO_NAME,
     "Coloriage": "Coloriage.mp4",
     "Jeu SANS chrono": "Jeu SANS chrono.mp4",
     "Jeu AVEC chrono": "Jeu AVEC chrono.mp4",
@@ -85,6 +87,33 @@ def str2bool(value):
     if value in {"false", "0", "no", "n", "off"}:
         return False
     raise argparse.ArgumentTypeError("Valeur booléenne attendue: true/false")
+
+
+def canonicalize_name(value: str) -> str:
+    """
+    Rend un nom comparable de manière:
+    - insensible à la casse
+    - insensible aux accents
+    """
+    normalized = unicodedata.normalize("NFD", value)
+    without_accents = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    return without_accents.casefold()
+
+
+def resolve_child_case_insensitive(parent: Path, target_name: str) -> Optional[Path]:
+    """
+    Cherche un fichier/dossier dans parent en ignorant casse et accents.
+    Retourne le Path réel si trouvé, sinon None.
+    """
+    if not parent.exists() or not parent.is_dir():
+        return None
+
+    target_key = canonicalize_name(target_name)
+    for child in parent.iterdir():
+        if canonicalize_name(child.name) == target_key:
+            return child
+
+    return None
 
 
 def euclidean(p1, p2):
@@ -278,6 +307,14 @@ def build_subject_dirs() -> List[Path]:
     ]
 
 
+def get_all_category_files() -> Dict[str, str]:
+    """
+    Retourne les catégories analysées en ajoutant l'étalon comme pseudo-catégorie.
+    L'étalon sera donc repassé après étalonnage, avec les mêmes règles que les autres vidéos.
+    """
+    return {"étalon": REFERENCE_VIDEO_NAME, **CATEGORY_FILES}
+
+
 # ============================================================
 # Deep data helpers
 # ============================================================
@@ -356,7 +393,7 @@ def write_detail_csv(detail_rows: List[List[str]], output_path: Path):
     max_len = max(len(r) for r in detail_rows)
     headers = ["Nomdedossier/nom_video", "Seuil bas EAR", "Seuil haut EAR"]
     n_time_cols = max_len - 3
-    headers.extend([f"{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
+    headers.extend([f"frame_{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -373,7 +410,7 @@ def write_detail_series_csv(series_rows: List[List[str]], output_path: Path):
     max_len = max(len(r) for r in series_rows)
     headers = ["Nomdedossier/nom_video"]
     n_time_cols = max_len - 1
-    headers.extend([f"{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
+    headers.extend([f"frame_{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -804,17 +841,17 @@ def analyze_video_one_pass(
 
 def find_first_valid_subject() -> Optional[Path]:
     for subject_dir in build_subject_dirs():
-        ref_video = subject_dir / REFERENCE_VIDEO_NAME
-        expected_file = subject_dir / EXPECTED_FILE_NAME
-        if ref_video.exists() and expected_file.exists():
+        ref_video = resolve_child_case_insensitive(subject_dir, REFERENCE_VIDEO_NAME)
+        expected_file = resolve_child_case_insensitive(subject_dir, EXPECTED_FILE_NAME)
+        if ref_video is not None and expected_file is not None:
             return subject_dir
     return None
 
 
 def find_first_available_category_video(subject_dir: Path) -> Tuple[Optional[str], Optional[Path]]:
     for category, filename in CATEGORY_FILES.items():
-        video_path = subject_dir / filename
-        if video_path.exists():
+        video_path = resolve_child_case_insensitive(subject_dir, filename)
+        if video_path is not None and video_path.is_file():
             return category, video_path
     return None, None
 
@@ -837,8 +874,11 @@ def run_dry_run_faithful(
         )
 
     subject_id = subject_dir.name
-    ref_video = subject_dir / REFERENCE_VIDEO_NAME
-    expected_file = subject_dir / EXPECTED_FILE_NAME
+    ref_video = resolve_child_case_insensitive(subject_dir, REFERENCE_VIDEO_NAME)
+    expected_file = resolve_child_case_insensitive(subject_dir, EXPECTED_FILE_NAME)
+    if ref_video is None or expected_file is None:
+        raise FileNotFoundError("Impossible de résoudre l'étalon ou attendu.txt.")
+
     expected_blinks = read_expected_blinks(expected_file)
 
     category_name, category_video = find_first_available_category_video(subject_dir)
@@ -948,7 +988,7 @@ def run_dry_run_dynamic(
     if not DRY_RUN_DIR.exists():
         raise FileNotFoundError(f"Dossier dry introuvable: {DRY_RUN_DIR}")
 
-    dry_videos = sorted(DRY_RUN_DIR.glob("*.mp4"))
+    dry_videos = sorted([p for p in DRY_RUN_DIR.glob("*.mp4") if p.is_file()])
     if not dry_videos:
         raise FileNotFoundError(f"Aucune vidéo .mp4 trouvée dans {DRY_RUN_DIR}")
 
@@ -1066,19 +1106,20 @@ def run_real(
     rows = []
     essential_rows = []
     reference_errors = []
+    all_categories = get_all_category_files()
 
     for subject_dir in subject_dirs:
         subject_id = subject_dir.name
-        ref_video = subject_dir / REFERENCE_VIDEO_NAME
-        expected_file = subject_dir / EXPECTED_FILE_NAME
+        ref_video = resolve_child_case_insensitive(subject_dir, REFERENCE_VIDEO_NAME)
+        expected_file = resolve_child_case_insensitive(subject_dir, EXPECTED_FILE_NAME)
 
         print(f"\n[SUBJECT] {subject_id}")
 
-        if not ref_video.exists():
+        if ref_video is None:
             print(f"  - ignoré: référence absente ({REFERENCE_VIDEO_NAME})")
             continue
 
-        if not expected_file.exists():
+        if expected_file is None:
             print(f"  - ignoré: attendu absent ({EXPECTED_FILE_NAME})")
             continue
 
@@ -1160,44 +1201,13 @@ def run_real(
             print(f"  - erreur calibration: {exc}")
             continue
 
-        if deepData:
-            append_deepdata_rows(
-                deep_rows=deep_rows,
-                deep_ear_rows=deep_ear_rows,
-                deep_ear_norm_rows=deep_ear_norm_rows,
-                video_label=f"{subject_id}/{ref_video.name}",
-                profile=profile,
-                thresholds=thresholds,
-                ears=ref_result["ears"],
-                norm_ears=ref_norm,
-                states=["o"] * len(ref_result["ears"]),
-            )
-
         row = {"subject": subject_id}
         essential_row = {"subject": subject_id}
 
-        row["étalon"] = ref_result["blink_count"]
-        row["étalon mean"] = format_optional_float(ref_result["blink_interval_mean"], 3)
-        row["étalon low"] = format_optional_float(ref_result["blink_interval_min"], 3)
-        row["étalon high"] = format_optional_float(ref_result["blink_interval_max"], 3)
-        row["étalon per minute"] = format_optional_float(ref_result["blinks_per_minute"], 1)
-        row["étalon Face Detect Rate"] = f"{ref_result['face_detect_rate']:.4f}"
+        for category, filename in all_categories.items():
+            video_path = resolve_child_case_insensitive(subject_dir, filename)
 
-        essential_row["étalon"] = format_optional_float(ref_result["blinks_per_minute"], 1)
-
-        print(
-            f"  - étalon stats: {ref_result['blink_count']} | "
-            f"mean={ref_result['blink_interval_mean'] if ref_result['blink_interval_mean'] is not None else 'NA'} | "
-            f"low={ref_result['blink_interval_min'] if ref_result['blink_interval_min'] is not None else 'NA'} | "
-            f"high={ref_result['blink_interval_max'] if ref_result['blink_interval_max'] is not None else 'NA'} | "
-            f"per_min={format_optional_float(ref_result['blinks_per_minute'], 1) if ref_result['blinks_per_minute'] is not None else 'NA'} | "
-            f"Face Detect Rate={ref_result['face_detect_rate']:.4f}"
-        )
-
-        for category, filename in CATEGORY_FILES.items():
-            video_path = subject_dir / filename
-
-            if not video_path.exists():
+            if video_path is None or not video_path.is_file():
                 row[category] = ""
                 row[f"{category} mean"] = ""
                 row[f"{category} low"] = ""
@@ -1205,7 +1215,9 @@ def run_real(
                 row[f"{category} per minute"] = ""
                 row[f"{category} Face Detect Rate"] = ""
 
-                essential_row[category] = ""
+                if category != "étalon":
+                    essential_row[category] = ""
+
                 print(f"  - {category}: absent")
                 continue
 
@@ -1241,7 +1253,8 @@ def run_real(
                 row[f"{category} per minute"] = format_optional_float(result["blinks_per_minute"], 1)
                 row[f"{category} Face Detect Rate"] = f"{result['face_detect_rate']:.4f}"
 
-                essential_row[category] = format_optional_float(result["blinks_per_minute"], 1)
+                if category != "étalon":
+                    essential_row[category] = format_optional_float(result["blinks_per_minute"], 1)
 
                 print(
                     f"  - {category}: {result['blink_count']} | "
@@ -1261,15 +1274,16 @@ def run_real(
                 row[f"{category} per minute"] = ""
                 row[f"{category} Face Detect Rate"] = ""
 
-                essential_row[category] = ""
+                if category != "étalon":
+                    essential_row[category] = ""
+
                 print(f"  - {category}: erreur ({exc})")
 
         rows.append(row)
         essential_rows.append(essential_row)
 
     fieldnames = ["subject"]
-    fieldnames.extend(full_metric_fields("étalon"))
-    for category in CATEGORY_FILES.keys():
+    for category in all_categories.keys():
         fieldnames.extend(full_metric_fields(category))
 
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
@@ -1277,7 +1291,8 @@ def run_real(
         writer.writeheader()
         writer.writerows(rows)
 
-    essential_fieldnames = ["subject", "étalon"] + list(CATEGORY_FILES.keys())
+    # Essential.csv : on retire désormais l'étalon
+    essential_fieldnames = ["subject"] + list(CATEGORY_FILES.keys())
     with open(ESSENTIAL_OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=essential_fieldnames)
         writer.writeheader()
