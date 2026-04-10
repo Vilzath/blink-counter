@@ -36,6 +36,7 @@ ERROR_REPORT_FILE = Path("Erreur relative.txt")
 ESSENTIAL_OUTPUT_CSV = Path("Essential.csv")
 
 CATEGORY_FILES = {
+    "Etalon": REFERENCE_VIDEO_NAME,
     "Coloriage": "Coloriage.mp4",
     "Jeu SANS chrono": "Jeu SANS chrono.mp4",
     "Jeu AVEC chrono": "Jeu AVEC chrono.mp4",
@@ -355,7 +356,7 @@ def write_detail_csv(detail_rows: List[List[str]], output_path: Path):
     max_len = max(len(r) for r in detail_rows)
     headers = ["Nomdedossier/nom_video", "Seuil bas EAR", "Seuil haut EAR"]
     n_time_cols = max_len - 3
-    headers.extend([f"frame_{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
+    headers.extend([f"{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -371,7 +372,7 @@ def write_detail_series_csv(series_rows: List[List[str]], output_path: Path):
     max_len = max(len(r) for r in series_rows)
     headers = ["Nomdedossier/nom_video"]
     n_time_cols = max_len - 1
-    headers.extend([f"frame_{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
+    headers.extend([f"{i * DEEPDATA_STEP_FRAMES}" for i in range(n_time_cols)])
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
