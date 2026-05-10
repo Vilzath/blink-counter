@@ -21,10 +21,6 @@ import mediapipe as mp
 import numpy as np
 
 
-# ============================================================
-# Configuration
-# ============================================================
-
 VIDEO_ROOT = Path("video")
 DRY_RUN_DIR = VIDEO_ROOT / "dry"
 DETAILS_DIR = Path("details")
@@ -39,7 +35,6 @@ MEAN_BLINK_TIME_CSV = Path("mean_blink_time.csv")
 MIN_MAX_BLINK_CSV = Path("min_max_blink.csv")
 
 CATEGORY_FILES = {
-    "Etalon": REFERENCE_VIDEO_NAME,
     "Coloriage": "Coloriage.mp4",
     "Jeu SANS chrono": "Jeu SANS chrono.mp4",
     "Jeu AVEC chrono": "Jeu AVEC chrono.mp4",
@@ -65,10 +60,6 @@ DRY_SHOW_WARMUP_VALID_FRAMES = 30
 SMOOTH_KERNEL = 3
 DEEPDATA_STEP_FRAMES = 5
 
-
-# ============================================================
-# Utils
-# ============================================================
 
 def str2bool(value):
     if isinstance(value, bool):
@@ -102,7 +93,7 @@ def euclidean(p1, p2):
 
 
 def landmark_to_pixel(landmark, width, height):
-    return (landmark.x * width, landmark.y * height)
+    return landmark.x * width, landmark.y * height
 
 
 def eye_aspect_ratio(landmarks, eye_indices, width, height):
@@ -213,7 +204,6 @@ def compute_blink_interval_stats(
         "max_interval": float(np.max(intervals)),
     }
 
-
 def compute_reference_error_metrics(reference_errors: List[Dict]) -> Dict[str, Optional[float]]:
     if not reference_errors:
         return {
@@ -239,11 +229,7 @@ def compute_reference_error_metrics(reference_errors: List[Dict]) -> Dict[str, O
     }
 
 
-def write_reference_error_report(
-    report_path: Path,
-    reference_errors: List[Dict],
-    metrics: Dict[str, Optional[float]],
-):
+def write_reference_error_report(report_path: Path, reference_errors: List[Dict], metrics: Dict[str, Optional[float]]):
     lines = []
     lines.append("Rapport global d'erreur sur les vidéos étalon")
     lines.append("")
@@ -296,10 +282,6 @@ def build_subject_dirs() -> List[Path]:
 def get_all_category_files() -> Dict[str, str]:
     return {"étalon": REFERENCE_VIDEO_NAME, **CATEGORY_FILES}
 
-
-# ============================================================
-# Deep data / seuils
-# ============================================================
 
 def denormalize_threshold(norm_threshold: float, profile: Optional[Dict]) -> Optional[float]:
     if profile is None:
@@ -510,10 +492,6 @@ def write_seuils_csv(rows: List[Dict]):
         writer.writerows(rows)
 
 
-# ============================================================
-# MediaPipe
-# ============================================================
-
 def create_landmarker(model_path: Path):
     BaseOptions = mp.tasks.BaseOptions
     FaceLandmarker = mp.tasks.vision.FaceLandmarker
@@ -534,13 +512,11 @@ def create_landmarker(model_path: Path):
 def draw_face_landmarks(frame, face_landmarks):
     h, w = frame.shape[:2]
 
-    # Tous les points
     for lm in face_landmarks:
         x = int(lm.x * w)
         y = int(lm.y * h)
         cv2.circle(frame, (x, y), 1, (255, 255, 255), -1)
 
-    # Yeux en couleur
     for idx in LEFT_EYE:
         lm = face_landmarks[idx]
         cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 3, (255, 0, 0), -1)
@@ -549,7 +525,6 @@ def draw_face_landmarks(frame, face_landmarks):
         lm = face_landmarks[idx]
         cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 3, (255, 0, 255), -1)
 
-    # Connexions approximatives des yeux utilisés pour EAR
     for eye, color in [(LEFT_EYE, (255, 0, 0)), (RIGHT_EYE, (255, 0, 255))]:
         pts = [(int(face_landmarks[i].x * w), int(face_landmarks[i].y * h)) for i in eye]
         for a, b in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]:
@@ -557,10 +532,6 @@ def draw_face_landmarks(frame, face_landmarks):
 
     return frame
 
-
-# ============================================================
-# Normalisation dynamique legacy
-# ============================================================
 
 class OnlineEarNormalizer:
     def __init__(self, warmup_valid_frames: int = 30):
@@ -594,10 +565,6 @@ class OnlineEarNormalizer:
         open_ref = float(np.percentile(arr, OPEN_PERCENTILE))
         return open_ref, closed_ref
 
-
-# ============================================================
-# Blink detector
-# ============================================================
 
 class OnlineBlinkDetector:
     def __init__(
@@ -655,10 +622,6 @@ class OnlineBlinkDetector:
 
         self.blink_states.append(state)
 
-
-# ============================================================
-# Calibration
-# ============================================================
 
 def build_profile_from_reference_ears(ears: np.ndarray) -> Dict:
     valid = np.isfinite(ears)
@@ -774,10 +737,6 @@ def calibrate_thresholds_on_reference(
 
     return best
 
-
-# ============================================================
-# Analyse vidéo
-# ============================================================
 
 def analyze_video_one_pass(
     model_path: Path,
@@ -896,8 +855,8 @@ def analyze_video_one_pass(
         cv2.destroyAllWindows()
 
     elapsed = time.perf_counter() - start_time
-    interval_stats = compute_blink_interval_stats(detector.blink_timestamps)
     duration_seconds = (frame_idx / fps) if (fps > 0 and frame_idx > 0) else None
+    interval_stats = compute_blink_interval_stats(detector.blink_timestamps, duration_seconds)
     blinks_per_minute = compute_blinks_per_minute(detector.blink_count, duration_seconds)
 
     return {
@@ -920,10 +879,6 @@ def analyze_video_one_pass(
         "elapsed_seconds": float(elapsed),
     }
 
-
-# ============================================================
-# Dry run
-# ============================================================
 
 def find_first_valid_subject() -> Optional[Path]:
     for subject_dir in build_subject_dirs():
@@ -1144,10 +1099,6 @@ def run_dry_run(
     else:
         raise ValueError(f"Mode dry-run inconnu: {mode}")
 
-
-# ============================================================
-# Real run
-# ============================================================
 
 def run_real(
     model_path: Path,
@@ -1436,18 +1387,26 @@ def run_real(
         print(summary)
 
 
-# ============================================================
-# Main
-# ============================================================
-
 def main():
     parser = argparse.ArgumentParser(
         description="Compteur de clignements avec EAR normalisé, dry-run et batch par sujet."
     )
 
     parser.add_argument("--model", required=True, help="Chemin vers face_landmarker.task")
-    parser.add_argument("--dry-run", type=str2bool, default=True, help="true par défaut. false pour le real run.")
-    parser.add_argument("--dry-run-mode", choices=["faithful", "dynamic"], default="faithful")
+    parser.add_argument(
+        "--dry-run",
+        nargs="?",
+        const=True,
+        default=True,
+        type=str2bool,
+        help="true par défaut. Passer false pour lancer le real run.",
+    )
+    parser.add_argument(
+        "--dry-run-mode",
+        choices=["dynamic", "faithful"],
+        default="dynamic",
+        help="Mode dry run: dynamic utilise le seul MP4 dans video/dry. faithful utilise un vrai dossier sujet.",
+    )
     parser.add_argument("--show", action="store_true", help="Affiche la vidéo annotée. Dry run uniquement.")
     parser.add_argument("--show-landmarks", action="store_true", help="Affiche les points MediaPipe sur la vidéo. Dry run uniquement.")
     parser.add_argument("--deepData", type=str2bool, default=False, help="Génère les CSV de détail par sujet dans /details.")
