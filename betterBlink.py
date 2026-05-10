@@ -163,23 +163,49 @@ def compute_blinks_per_minute(blink_count: int, duration_seconds: Optional[float
     return float((blink_count * 60.0) / duration_seconds)
 
 
-def compute_blink_interval_stats(blink_timestamps: List[float]) -> Dict[str, Optional[float]]:
-    if blink_timestamps is None or len(blink_timestamps) < 2:
+def compute_blink_interval_stats(
+    blink_timestamps: List[float],
+    duration_seconds: Optional[float],
+) -> Dict[str, Optional[float]]:
+    """
+    Règles :
+    - 0 clignement :
+        intervalle = durée totale de la vidéo
+
+    - 1 clignement :
+        intervalle = max(
+            temps entre début vidéo et clignement,
+            temps entre clignement et fin vidéo
+        )
+
+    - 2 clignements ou plus :
+        intervalle = écarts entre clignements successifs
+    """
+    if duration_seconds is None or duration_seconds < 0:
+        duration_seconds = 0.0
+
+    if blink_timestamps is None or len(blink_timestamps) == 0:
+        fallback = float(duration_seconds)
         return {
-            "mean_interval": None,
-            "min_interval": None,
-            "max_interval": None,
+            "mean_interval": fallback,
+            "min_interval": fallback,
+            "max_interval": fallback,
+        }
+
+    if len(blink_timestamps) == 1:
+        ts = float(blink_timestamps[0])
+        before = max(0.0, ts)
+        after = max(0.0, float(duration_seconds) - ts)
+        fallback = max(before, after)
+
+        return {
+            "mean_interval": fallback,
+            "min_interval": fallback,
+            "max_interval": fallback,
         }
 
     ts = np.array(blink_timestamps, dtype=np.float32)
     intervals = np.diff(ts)
-
-    if intervals.size == 0:
-        return {
-            "mean_interval": None,
-            "min_interval": None,
-            "max_interval": None,
-        }
 
     return {
         "mean_interval": float(np.mean(intervals)),
